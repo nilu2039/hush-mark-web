@@ -1,3 +1,5 @@
+import { HushmarkWorkspace } from "@/components/hushmark-workspace";
+
 export default function Home() {
-  return <div>hello</div>;
+  return <HushmarkWorkspace />;
 }
