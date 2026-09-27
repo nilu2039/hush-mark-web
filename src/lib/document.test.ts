@@ -7,12 +7,12 @@ test("document review preserves Unicode spans, original file, and detection orde
   const file = new File(["👋 Email me@example.com\r\n"], "notes.md", { type: "text/markdown" });
   const text = "👋 Email me@example.com\r\n";
   const analysis = {
-    analysisId: "ana_1",
+    analysisId: "ana_11111111111111111111111111111111",
     text,
     textLength: Array.from(text).length,
     detections: [
       { id: "det_2", type: "EMAIL", start: 8, end: 22, confidence: 0.99, source: "regex", status: "pending" },
-      { id: "det_1", type: "OTHER", start: 0, end: 1, confidence: 0.6, source: "model", status: "pending" },
+      { id: "det_1", type: "PERSON", start: 0, end: 1, confidence: 0.6, source: "model", status: "pending" },
     ],
   };
   const previousAdapter = api.defaults.adapter;
@@ -43,10 +43,10 @@ test("document review preserves Unicode spans, original file, and detection orde
       expect(await uploaded.text()).toBe(text);
     }
     expect(JSON.parse(calls[1].body?.get("review") as string)).toEqual({
-      analysisId: "ana_1",
+      analysisId: "ana_11111111111111111111111111111111",
       detections: [
         { id: "det_2", type: "EMAIL", start: 8, end: 22, status: "approved" },
-        { id: "det_1", type: "OTHER", start: 0, end: 1, status: "rejected" },
+        { id: "det_1", type: "PERSON", start: 0, end: 1, status: "rejected" },
       ],
     });
     expect(documentAnalysisResponseSchema.safeParse({ ...analysis, textLength: 1 }).success).toBe(false);

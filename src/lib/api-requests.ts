@@ -9,6 +9,7 @@ import {
   documentFileSchema,
   redactDocumentRequestSchema,
   redactAudioRequestSchema,
+  redactTextRequestSchema,
   textAnalysisResponseSchema,
   textFormSchema,
   type AnalyzeAudioInput,
@@ -16,6 +17,7 @@ import {
   type AnalyzeTextInput,
   type RedactAudioRequest,
   type RedactDocumentRequest,
+  type RedactTextRequest,
 } from "@/schema/hushmark";
 
 export class ApiRequestError extends Error {
@@ -35,9 +37,9 @@ async function toApiError(error: unknown) {
   }
 
   let body: unknown = error.response?.data;
-  if (body instanceof Blob) {
+  if (body instanceof Blob || typeof body === "string") {
     try {
-      body = JSON.parse(await body.text());
+      body = JSON.parse(body instanceof Blob ? await body.text() : body);
     } catch {
       body = undefined;
     }
@@ -57,6 +59,19 @@ export async function analyzeText(input: AnalyzeTextInput) {
   try {
     const { data } = await api.post("/analyze", request);
     return textAnalysisResponseSchema.parse(data);
+  } catch (error) {
+    throw await toApiError(error);
+  }
+}
+
+export async function redactText(input: RedactTextRequest) {
+  const { text, analysisId, detections } = redactTextRequestSchema.parse(input);
+  try {
+    const { data } = await api.post<string>("/redact", {
+      text,
+      review: { analysisId, detections },
+    }, { responseType: "text" });
+    return data;
   } catch (error) {
     throw await toApiError(error);
   }

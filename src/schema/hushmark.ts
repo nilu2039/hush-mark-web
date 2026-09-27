@@ -33,10 +33,17 @@ export const analyzeTextRequestSchema = z
   .strict();
 
 export const reviewStatusSchema = z.enum(["pending", "approved", "rejected"]);
+export const piiTypeSchema = z.enum([
+  "PERSON", "EMAIL", "PHONE", "ADDRESS", "DATE_OF_BIRTH", "IP_ADDRESS",
+  "AADHAAR", "PAN", "BANK_ACCOUNT", "PAYMENT_CARD",
+]);
+const analysisIdSchema = z.string().regex(/^ana_[0-9a-f]{32}$/);
+const markIdSchema = z.string().regex(/^(det|man)_[1-9]\d*$/);
+const finalStatusSchema = reviewStatusSchema.exclude(["pending"]);
 
 export const detectionSchema = z.object({
   id: z.string(),
-  type: z.string(),
+  type: piiTypeSchema,
   start: z.number().int().nonnegative(),
   end: z.number().int().positive(),
   confidence: z.number().min(0).max(1),
@@ -50,7 +57,7 @@ export const audioDetectionSchema = detectionSchema.extend({
 });
 
 export const textAnalysisResponseSchema = z.object({
-  analysisId: z.string(),
+  analysisId: analysisIdSchema,
   textLength: z.number().int().nonnegative(),
   detections: z.array(detectionSchema),
 });
@@ -99,38 +106,45 @@ export const documentAnalysisResponseSchema = textAnalysisResponseSchema.extend(
     context.addIssue({ code: "custom", message: "Document text length does not match its analysis." });
   }
   const ids = new Set<string>();
-  let end = 0;
-  for (const detection of [...analysis.detections].sort((a, b) => a.start - b.start)) {
-    if (ids.has(detection.id) || detection.start < end || detection.end > analysis.textLength || detection.start >= detection.end) {
+  for (const detection of analysis.detections) {
+    if (ids.has(detection.id) || detection.end > analysis.textLength || detection.start >= detection.end) {
       context.addIssue({ code: "custom", message: "Document detections contain invalid spans." });
       break;
     }
     ids.add(detection.id);
-    end = detection.end;
   }
 });
 
 export const redactDocumentRequestSchema = z.object({
   file: documentFileSchema,
-  analysisId: z.string().min(1),
-  detections: z.array(detectionSchema.pick({
-    id: true,
-    type: true,
-    start: true,
-    end: true,
-  }).extend({ status: reviewStatusSchema.exclude(["pending"]) }).strict()),
+  analysisId: analysisIdSchema,
+  detections: z.array(z.object({
+    id: markIdSchema,
+    type: piiTypeSchema,
+    start: z.number().int().nonnegative(),
+    end: z.number().int().positive(),
+    status: finalStatusSchema,
+  }).strict()),
 });
 
 export const redactAudioRequestSchema = z.object({
-  analysisId: z.string().min(1),
+  analysisId: analysisIdSchema,
   file: audioFileSchema,
   detections: z.array(
-    audioDetectionSchema.pick({
-      id: true,
-      audioStartMs: true,
-      audioEndMs: true,
-    }).extend({ status: reviewStatusSchema.exclude(["pending"]) }),
+    z.object({
+      id: markIdSchema,
+      type: piiTypeSchema.optional(),
+      audioStartMs: z.number().int().nonnegative(),
+      audioEndMs: z.number().int().positive(),
+      status: finalStatusSchema,
+    }).strict().refine((mark) => !mark.id.startsWith("man_") || mark.type, "Manual audio marks need a type."),
   ),
+});
+
+export const redactTextRequestSchema = z.object({
+  text: textSchema,
+  analysisId: analysisIdSchema,
+  detections: redactDocumentRequestSchema.shape.detections,
 });
 
 export type ReviewStatus = z.infer<typeof reviewStatusSchema>;
@@ -144,3 +158,5 @@ export type AnalyzeDocumentInput = z.infer<typeof documentFileSchema>;
 export type RedactAudioRequest = z.infer<typeof redactAudioRequestSchema>;
 export type DocumentAnalysisResponse = z.infer<typeof documentAnalysisResponseSchema>;
 export type RedactDocumentRequest = z.infer<typeof redactDocumentRequestSchema>;
+export type RedactTextRequest = z.infer<typeof redactTextRequestSchema>;
+export type PiiType = z.infer<typeof piiTypeSchema>;

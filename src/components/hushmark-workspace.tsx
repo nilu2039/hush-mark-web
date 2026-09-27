@@ -25,24 +25,28 @@ import { useForm } from "@tanstack/react-form";
 import { useCallback, useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { hasAudioSignal } from "@/lib/audio";
-import { formatEntityType, redactText, textForDetection } from "@/lib/pii";
+import { formatEntityType, textForDetection } from "@/lib/pii";
+import { apiOffset, audioReviewIssue, nextManualId, textReviewIssue } from "@/lib/review";
 import {
   useAnalyzeAudioMutation,
   useAnalyzeDocumentMutation,
   useAnalyzeTextMutation,
   useRedactAudioMutation,
   useRedactDocumentMutation,
+  useRedactTextMutation,
 } from "@/mutations";
 import {
   audioFormSchema,
   documentFormSchema,
   MAX_TEXT_LENGTH,
+  piiTypeSchema,
   textFormSchema,
   type AudioAnalysisResponse,
   type AudioDetection,
   type Detection,
   type ReviewStatus,
   type TextAnalysisResponse,
+  type PiiType,
 } from "@/schema/hushmark";
 
 type Mode = "text" | "document" | "audio";
@@ -92,10 +96,20 @@ function HighlightedText({
 }) {
   const points = Array.from(text);
   const content: ReactNode[] = [];
-  let cursor = 0;
+  const valid = detections.filter(({ start, end }) => start >= 0 && start < end && end <= points.length);
+  const boundaries = [...new Set([0, points.length, ...valid.flatMap(({ start, end }) => [start, end])])].sort((a, b) => a - b);
+  const priority = { approved: 3, pending: 2, rejected: 1 };
+  const ranked = [...valid].sort((a, b) => priority[decisions[b.id] ?? "pending"] - priority[decisions[a.id] ?? "pending"]);
 
-  for (const detection of detections) {
-    content.push(points.slice(cursor, detection.start).join(""));
+  for (let index = 0; index < boundaries.length - 1; index++) {
+    const start = boundaries[index];
+    const end = boundaries[index + 1];
+    const value = points.slice(start, end).join("");
+    const detection = ranked.find((mark) => mark.start <= start && mark.end >= end);
+    if (!detection) {
+      content.push(value);
+      continue;
+    }
     const status = decisions[detection.id];
     const className =
       status === "approved"
@@ -103,13 +117,11 @@ function HighlightedText({
         : status === "rejected"
           ? "bg-muted text-muted-foreground line-through decoration-muted-foreground/40 ring-border"
           : "bg-accent/25 text-foreground ring-accent/45";
-    const value = points.slice(detection.start, detection.end).join("");
-
     content.push(
       onSelect ? (
         <button
           type="button"
-          key={detection.id}
+          key={`${detection.id}-${start}`}
           className={`rounded px-1 py-0.5 font-medium ring-1 transition hover:ring-2 ${className}`}
           onClick={() => onSelect(detection)}
           title={`Play ${formatEntityType(detection.type)} segment`}
@@ -117,15 +129,12 @@ function HighlightedText({
           {value}
         </button>
       ) : (
-        <mark key={detection.id} className={`rounded px-1 py-0.5 ring-1 ${className}`}>
+        <mark key={`${detection.id}-${start}`} className={`rounded px-1 py-0.5 ring-1 ${className}`}>
           {value}
         </mark>
       ),
     );
-    cursor = detection.end;
   }
-
-  content.push(points.slice(cursor).join(""));
   return <>{content}</>;
 }
 
@@ -135,6 +144,7 @@ function ReviewList({
   decisions,
   onDecision,
   onPreview,
+  onEdit,
   showOffsets = false,
 }: {
   text: string;
@@ -142,6 +152,7 @@ function ReviewList({
   decisions: Decisions;
   onDecision: (id: string, status: Exclude<ReviewStatus, "pending">) => void;
   onPreview?: (detection: AudioDetection) => void;
+  onEdit?: (id: string, change: Partial<Detection & AudioDetection>) => void;
   showOffsets?: boolean;
 }) {
   if (detections.length === 0) {
@@ -178,7 +189,7 @@ function ReviewList({
                     {formatEntityType(detection.type)}
                   </span>
                   <span className="text-xs text-muted-foreground">
-                    {showOffsets ? "Confidence " : ""}{Math.round(detection.confidence * 100)}%{showOffsets ? "" : " match"} · {detection.source}
+                    {detection.id.startsWith("man_") ? "Added manually" : `${Math.round(detection.confidence * 100)}% match · ${detection.source}`}
                   </span>
                   {showOffsets && (
                     <span className="text-xs text-muted-foreground">
@@ -193,7 +204,7 @@ function ReviewList({
                   )}
                 </div>
                 <p className="mt-2 truncate text-base font-medium" title={textForDetection(text, detection.start, detection.end)}>
-                  “{textForDetection(text, detection.start, detection.end)}”
+                  {audioDetection && detection.id.startsWith("man_") ? "Manual audio interval" : `“${textForDetection(text, detection.start, detection.end)}”`}
                 </p>
               </div>
               {audioDetection && onPreview && (
@@ -208,6 +219,35 @@ function ReviewList({
                 </Button>
               )}
             </div>
+
+            {onEdit && (
+              <div className="mt-4 grid gap-3 sm:ml-11 sm:grid-cols-3">
+                <label className="text-xs font-medium">Type
+                  <select value={detection.type} onChange={(event) => onEdit(detection.id, { type: event.target.value as PiiType })} className="mt-1 h-10 w-full rounded-xl border bg-background px-2 text-sm focus:ring-2 focus:ring-ring">
+                    {piiTypeSchema.options.map((type) => <option key={type} value={type}>{formatEntityType(type)}</option>)}
+                  </select>
+                </label>
+                {audioDetection ? (
+                  <>
+                    <label className="text-xs font-medium">Start (seconds)
+                      <input type="number" min="0" step="0.001" defaultValue={audioDetection.audioStartMs / 1000} onBlur={(event) => onEdit(detection.id, { audioStartMs: Math.round(Number(event.target.value) * 1000) })} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
+                    </label>
+                    <label className="text-xs font-medium">End (seconds)
+                      <input type="number" min="0" step="0.001" defaultValue={audioDetection.audioEndMs / 1000} onBlur={(event) => onEdit(detection.id, { audioEndMs: Math.round(Number(event.target.value) * 1000) })} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
+                    </label>
+                  </>
+                ) : (
+                  <>
+                    <label className="text-xs font-medium">Start (character)
+                      <input type="number" min="0" step="1" value={detection.start} onChange={(event) => onEdit(detection.id, { start: Number(event.target.value) })} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
+                    </label>
+                    <label className="text-xs font-medium">End (exclusive)
+                      <input type="number" min="1" step="1" value={detection.end} onChange={(event) => onEdit(detection.id, { end: Number(event.target.value) })} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
+                    </label>
+                  </>
+                )}
+              </div>
+            )}
 
             <div className="mt-4 grid grid-cols-2 gap-2 sm:ml-11 sm:flex">
               <Button
@@ -284,29 +324,78 @@ function ReviewHeader({
   );
 }
 
+function AddTextMark({ text, onAdd, selectable = false }: { text: string; onAdd: (type: PiiType, start: number, end: number) => void; selectable?: boolean }) {
+  const [type, setType] = useState<PiiType>("PERSON");
+  const [start, setStart] = useState(0);
+  const [end, setEnd] = useState(0);
+  const length = Array.from(text).length;
+  return (
+    <div className="mt-5 rounded-2xl border bg-card p-4">
+      <p className="font-semibold">Add a missed detail</p>
+      <p className="mt-1 text-xs text-muted-foreground">Enter its character range in the original text. The end is exclusive.</p>
+      {selectable && (
+        <textarea readOnly value={text} rows={3} aria-label="Select a missed detail in the original text" className="mt-3 w-full resize-y rounded-xl border bg-background p-3 text-sm focus:ring-2 focus:ring-ring" onSelect={(event) => {
+          const target = event.currentTarget;
+          setStart(apiOffset(text, target.selectionStart));
+          setEnd(apiOffset(text, target.selectionEnd));
+        }} />
+      )}
+      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+        <label className="text-xs font-medium">Type
+          <select value={type} onChange={(event) => setType(event.target.value as PiiType)} className="mt-1 h-10 w-full rounded-xl border bg-background px-2 text-sm focus:ring-2 focus:ring-ring">
+            {piiTypeSchema.options.map((option) => <option key={option} value={option}>{formatEntityType(option)}</option>)}
+          </select>
+        </label>
+        <label className="text-xs font-medium">Start
+          <input type="number" min="0" max={length} step="1" value={start} onChange={(event) => setStart(Number(event.target.value))} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
+        </label>
+        <label className="text-xs font-medium">End
+          <input type="number" min="1" max={length} step="1" value={end} onChange={(event) => setEnd(Number(event.target.value))} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
+        </label>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+        <p className="max-w-64 truncate text-sm text-muted-foreground">{start < end ? `“${textForDetection(text, start, end)}”` : "Select a valid range."}</p>
+        <Button type="button" variant="outline" disabled={!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start >= end || end > length} onClick={() => { onAdd(type, start, end); setEnd(start); }}>Add mark</Button>
+      </div>
+    </div>
+  );
+}
+
 function TextWorkspace() {
   const analyzeMutation = useAnalyzeTextMutation();
+  const redactMutation = useRedactTextMutation();
+  const reviewVersion = useRef(0);
   const [review, setReview] = useState<
     (TextAnalysisResponse & { text: string; decisions: Decisions }) | null
   >(null);
+  const [redactedText, setRedactedText] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   const form = useForm({
     defaultValues: { text: "" },
     validators: { onSubmit: textFormSchema },
     onSubmit: async ({ value }) => {
+      const version = ++reviewVersion.current;
+      setReview(null);
+      setRedactedText(null);
+      redactMutation.reset();
       const result = await analyzeMutation.mutateAsync(value);
+      if (version !== reviewVersion.current) return;
       setReview({ ...result, text: value.text, decisions: pendingDecisions(result.detections) });
     },
   });
 
   function updateDecision(id: string, status: Exclude<ReviewStatus, "pending">) {
+    reviewVersion.current++;
     setReview((current) =>
       current ? { ...current, decisions: { ...current.decisions, [id]: status } } : current,
     );
+    setRedactedText(null);
+    redactMutation.reset();
   }
 
   function setAll(status: Exclude<ReviewStatus, "pending">) {
+    reviewVersion.current++;
     setReview((current) =>
       current
         ? {
@@ -315,15 +404,48 @@ function TextWorkspace() {
           }
         : current,
     );
+    setRedactedText(null);
+    redactMutation.reset();
   }
 
-  const safeText = review ? redactText(review.text, review.detections, review.decisions) : "";
-  const pending = review?.detections.filter(({ id }) => review.decisions[id] === "pending").length ?? 0;
+  function editMark(id: string, change: Partial<Detection>) {
+    reviewVersion.current++;
+    setReview((current) => current ? { ...current, detections: current.detections.map((mark) => mark.id === id ? { ...mark, ...change } : mark) } : current);
+    setRedactedText(null);
+    redactMutation.reset();
+  }
+
+  function addMark(type: PiiType, start: number, end: number) {
+    reviewVersion.current++;
+    setReview((current) => current ? {
+      ...current,
+      detections: [...current.detections, { id: nextManualId(current.detections), type, start, end, status: "pending", confidence: 1, source: "manual" }],
+      decisions: { ...current.decisions, [nextManualId(current.detections)]: "pending" },
+    } : current);
+    setRedactedText(null);
+    redactMutation.reset();
+  }
+
+  const marks = review?.detections.map((mark) => ({ ...mark, status: review.decisions[mark.id] ?? "pending" })) ?? [];
+  const issue = review ? textReviewIssue(marks, review.textLength) : null;
 
   async function copySafeText() {
-    await navigator.clipboard.writeText(safeText);
+    if (redactedText === null) return;
+    await navigator.clipboard.writeText(redactedText);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1600);
+  }
+
+  async function exportText() {
+    if (!review || issue) return;
+    const version = reviewVersion.current;
+    const detections = marks.map(({ id, type, start, end, status }) => ({ id, type, start, end, status: status as "approved" | "rejected" }));
+    try {
+      const result = await redactMutation.mutateAsync({ text: review.text, analysisId: review.analysisId, detections });
+      if (version === reviewVersion.current) setRedactedText(result);
+    } catch {
+      // The mutation error is shown below the export button.
+    }
   }
 
   return (
@@ -364,8 +486,11 @@ function TextWorkspace() {
                   onBlur={field.handleBlur}
                   onChange={(event) => {
                     field.handleChange(event.target.value);
+                    reviewVersion.current++;
                     if (review && event.target.value !== review.text) setReview(null);
+                    setRedactedText(null);
                     analyzeMutation.reset();
+                    redactMutation.reset();
                   }}
                 />
                 <div className="mt-2 flex min-h-5 items-center justify-between text-xs">
@@ -412,23 +537,33 @@ function TextWorkspace() {
                 <HighlightedText text={review.text} detections={review.detections} decisions={review.decisions} />
               </div>
 
-              {pending === 0 && (
-                <div className="mt-5 border-t pt-5">
-                  <div className="mb-3 flex items-center justify-between gap-3">
-                    <div>
-                      <p className="font-semibold">Protected copy</p>
-                      <p className="text-xs text-muted-foreground">Approved details are replaced locally.</p>
-                    </div>
-                    <Button type="button" variant="outline" onClick={() => void copySafeText()}>
-                      {copied ? <RiCheckLine aria-hidden="true" /> : <RiFileCopyLine aria-hidden="true" />}
-                      {copied ? "Copied" : "Copy"}
-                    </Button>
-                  </div>
-                  <div className="max-h-56 overflow-auto whitespace-pre-wrap rounded-2xl border border-primary/15 bg-primary/5 p-4 text-sm leading-7">
-                    {safeText}
-                  </div>
+              <div className="mt-5 border-t pt-5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="font-semibold">Create protected copy</p>
+                  <Button type="button" size="lg" disabled={Boolean(issue) || redactMutation.isPending} onClick={() => void exportText()}>
+                    {redactMutation.isPending ? <LoadingLabel>Creating…</LoadingLabel> : <><RiShieldCheckFill aria-hidden="true" />Create text</>}
+                  </Button>
                 </div>
-              )}
+                {issue && <p className="mt-2 text-sm text-destructive" role="alert">{issue}</p>}
+                <div className="mt-3"><ErrorMessage error={redactMutation.error} /></div>
+                {redactedText !== null && (
+                  <div className="mt-5">
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <div>
+                        <p className="font-semibold">Protected copy</p>
+                        <p className="text-xs text-muted-foreground">Approved details were replaced by the service.</p>
+                      </div>
+                      <Button type="button" variant="outline" onClick={() => void copySafeText()}>
+                        {copied ? <RiCheckLine aria-hidden="true" /> : <RiFileCopyLine aria-hidden="true" />}
+                        {copied ? "Copied" : "Copy"}
+                      </Button>
+                    </div>
+                    <div className="max-h-56 overflow-auto whitespace-pre-wrap rounded-2xl border border-primary/15 bg-primary/5 p-4 text-sm leading-7">
+                      {redactedText}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
           <div>
@@ -438,7 +573,9 @@ function TextWorkspace() {
               detections={review.detections}
               decisions={review.decisions}
               onDecision={updateDecision}
+              onEdit={editMark}
             />
+            <AddTextMark text={review.text} onAdd={addMark} selectable />
           </div>
         </section>
       )}
@@ -452,7 +589,9 @@ function DocumentWorkspace() {
   const inputRef = useRef<HTMLInputElement>(null);
   const selectedFileRef = useRef<File | null>(null);
   const reviewVersion = useRef(0);
+  const manualIdsRef = useRef<{ id: string }[]>([]);
   const [reviewFile, setReviewFile] = useState<File | null>(null);
+  const [marks, setMarks] = useState<Detection[]>([]);
   const [decisions, setDecisions] = useState<Decisions>({});
   const [outputUrl, setOutputUrl] = useState<string | null>(null);
   const analysis = reviewFile ? analyzeMutation.data : undefined;
@@ -468,11 +607,15 @@ function DocumentWorkspace() {
       if (!value.file) return;
       const version = ++reviewVersion.current;
       setReviewFile(null);
+      manualIdsRef.current = [];
+      setMarks([]);
       setDecisions({});
       setOutputUrl(null);
+      redactMutation.reset();
       const result = await analyzeMutation.mutateAsync(value.file);
       if (selectedFileRef.current !== value.file || version !== reviewVersion.current) return;
       setReviewFile(value.file);
+      setMarks(result.detections);
       setDecisions(pendingDecisions(result.detections));
     },
   });
@@ -483,6 +626,8 @@ function DocumentWorkspace() {
     form.setFieldValue("file", file);
     form.validateField("file", "change");
     setReviewFile(null);
+    manualIdsRef.current = [];
+    setMarks([]);
     setDecisions({});
     setOutputUrl(null);
     analyzeMutation.reset();
@@ -499,15 +644,34 @@ function DocumentWorkspace() {
   function setAll(status: Exclude<ReviewStatus, "pending">) {
     if (!analysis) return;
     reviewVersion.current += 1;
-    setDecisions(Object.fromEntries(analysis.detections.map(({ id }) => [id, status])));
+    setDecisions(Object.fromEntries(marks.map(({ id }) => [id, status])));
     setOutputUrl(null);
     redactMutation.reset();
   }
 
+  function editMark(id: string, change: Partial<Detection>) {
+    reviewVersion.current++;
+    setMarks((current) => current.map((mark) => mark.id === id ? { ...mark, ...change } : mark));
+    setOutputUrl(null);
+    redactMutation.reset();
+  }
+
+  function addMark(type: PiiType, start: number, end: number) {
+    reviewVersion.current++;
+    const id = nextManualId([...marks, ...manualIdsRef.current]);
+    manualIdsRef.current.push({ id });
+    setMarks((current) => [...current, { id, type, start, end, status: "pending", confidence: 1, source: "manual" }]);
+    setDecisions((current) => ({ ...current, [id]: "pending" }));
+    setOutputUrl(null);
+    redactMutation.reset();
+  }
+
+  const issue = analysis ? textReviewIssue(marks.map((mark) => ({ ...mark, status: decisions[mark.id] ?? "pending" })), analysis.textLength) : null;
+
   async function exportDocument() {
-    if (!analysis || !reviewFile) return;
+    if (!analysis || !reviewFile || issue) return;
     const version = reviewVersion.current;
-    const detections = analysis.detections.map(({ id, type, start, end }) => ({
+    const detections = marks.map(({ id, type, start, end }) => ({
       id,
       type,
       start,
@@ -526,7 +690,7 @@ function DocumentWorkspace() {
     }
   }
 
-  const pending = analysis?.detections.filter(({ id }) => decisions[id] !== "approved" && decisions[id] !== "rejected").length ?? 0;
+  const pending = marks.filter(({ id }) => decisions[id] !== "approved" && decisions[id] !== "rejected").length;
   const extension = reviewFile?.name.match(/\.(txt|md|markdown)$/i)?.[0] ?? ".txt";
 
   return (
@@ -607,7 +771,7 @@ function DocumentWorkspace() {
               <div className="max-h-96 overflow-auto whitespace-pre-wrap rounded-2xl bg-muted/55 p-4 text-[15px] leading-8">
                 <HighlightedText
                   text={analysis.text}
-                  detections={[...analysis.detections].sort((a, b) => a.start - b.start)}
+                  detections={marks}
                   decisions={decisions}
                 />
               </div>
@@ -620,26 +784,28 @@ function DocumentWorkspace() {
                       {pending ? `Review ${pending} remaining ${pending === 1 ? "item" : "items"}.` : "All detections reviewed."}
                     </p>
                   </div>
-                  <Button type="button" size="lg" disabled={pending > 0 || redactMutation.isPending} onClick={() => void exportDocument()}>
+                  <Button type="button" size="lg" disabled={Boolean(issue) || redactMutation.isPending} onClick={() => void exportDocument()}>
                     {redactMutation.isPending ? <LoadingLabel>Creating…</LoadingLabel> : <><RiShieldCheckFill aria-hidden="true" />Create file</>}
                   </Button>
                 </div>
+                {issue && <p className="mt-2 text-sm text-destructive" role="alert">{issue}</p>}
                 <div className="mt-3"><ErrorMessage error={redactMutation.error} /></div>
                 {outputUrl && (
                   <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-primary/20 bg-primary/6 p-4">
                     <p className="font-semibold">Protected document is ready</p>
-                    <Button nativeButton={false} render={<a href={outputUrl} download={`redacted${extension}`} />}>
+                    <Button nativeButton={false} render={<a href={outputUrl} download={`redacted${extension}`} onClick={() => window.setTimeout(() => setOutputUrl((current) => current === outputUrl ? null : current), 1000)} />}>
                       <RiDownloadLine aria-hidden="true" />Download
                     </Button>
                   </div>
                 )}
-                <p className="mt-3 text-xs text-muted-foreground">If any PII was missed, do not share the export. Manual spans are not supported. Inspect the downloaded file before sharing, especially Markdown formatting.</p>
+                <p className="mt-3 text-xs text-muted-foreground">Inspect the downloaded file before sharing, especially Markdown formatting.</p>
               </div>
             </div>
           </div>
           <div>
-            <ReviewHeader detections={analysis.detections} decisions={decisions} onSetAll={setAll} />
-            <ReviewList text={analysis.text} detections={analysis.detections} decisions={decisions} onDecision={updateDecision} showOffsets />
+            <ReviewHeader detections={marks} decisions={decisions} onSetAll={setAll} />
+            <ReviewList text={analysis.text} detections={marks} decisions={decisions} onDecision={updateDecision} onEdit={editMark} showOffsets />
+            <AddTextMark text={analysis.text} onAdd={addMark} />
           </div>
         </section>
       )}
@@ -660,8 +826,14 @@ function AudioWorkspace() {
   const heardAudioRef = useRef(false);
   const chunksRef = useRef<Blob[]>([]);
   const previewTimerRef = useRef<number | null>(null);
+  const selectedAudioRef = useRef<File | null>(null);
+  const reviewVersion = useRef(0);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [outputUrl, setOutputUrl] = useState<string | null>(null);
+  const [durationMs, setDurationMs] = useState<number | undefined>(undefined);
+  const [manualType, setManualType] = useState<PiiType>("PERSON");
+  const [manualStart, setManualStart] = useState("0");
+  const [manualEnd, setManualEnd] = useState("0");
   const [microphones, setMicrophones] = useState<MediaDeviceInfo[]>([]);
   const [selectedMicrophoneId, setSelectedMicrophoneId] = useState("");
   const [activeMicrophoneName, setActiveMicrophoneName] = useState("");
@@ -676,7 +848,12 @@ function AudioWorkspace() {
     validators: { onSubmit: audioFormSchema },
     onSubmit: async ({ value }) => {
       if (!value.file) return;
+      const version = ++reviewVersion.current;
+      setReview(null);
+      setOutputUrl(null);
+      redactMutation.reset();
       const result = await analyzeMutation.mutateAsync(value.file);
+      if (version !== reviewVersion.current || selectedAudioRef.current !== value.file) return;
       setReview({ ...result, file: value.file, decisions: pendingDecisions(result.detections) });
     },
   });
@@ -760,10 +937,15 @@ function AudioWorkspace() {
   }
 
   function chooseFile(file: File) {
+    selectedAudioRef.current = file;
+    reviewVersion.current++;
     form.setFieldValue("file", file);
     form.validateField("file", "change");
     setFileUrl(URL.createObjectURL(file));
     setOutputUrl(null);
+    setDurationMs(undefined);
+    setManualStart("0");
+    setManualEnd("0");
     setReview(null);
     analyzeMutation.reset();
     redactMutation.reset();
@@ -848,12 +1030,16 @@ function AudioWorkspace() {
   }
 
   function updateDecision(id: string, status: Exclude<ReviewStatus, "pending">) {
+    reviewVersion.current++;
     setReview((current) =>
       current ? { ...current, decisions: { ...current.decisions, [id]: status } } : current,
     );
+    setOutputUrl(null);
+    redactMutation.reset();
   }
 
   function setAll(status: Exclude<ReviewStatus, "pending">) {
+    reviewVersion.current++;
     setReview((current) =>
       current
         ? {
@@ -862,6 +1048,34 @@ function AudioWorkspace() {
           }
         : current,
     );
+    setOutputUrl(null);
+    redactMutation.reset();
+  }
+
+  function editMark(id: string, change: Partial<AudioDetection>) {
+    reviewVersion.current++;
+    setReview((current) => current ? { ...current, detections: current.detections.map((mark) => mark.id === id ? { ...mark, ...change } : mark) } : current);
+    setOutputUrl(null);
+    redactMutation.reset();
+  }
+
+  function addMark() {
+    if (!review) return;
+    const audioStartMs = Math.round(Number(manualStart) * 1000);
+    const audioEndMs = Math.round(Number(manualEnd) * 1000);
+    if (audioStartMs < 0 || audioStartMs >= audioEndMs || (durationMs !== undefined && audioEndMs > durationMs)) return;
+    reviewVersion.current++;
+    setReview((current) => current ? {
+      ...current,
+      detections: [...current.detections, {
+        id: nextManualId(current.detections), type: manualType, start: 0, end: 0,
+        audioStartMs, audioEndMs, status: "pending", confidence: 1, source: "manual",
+      }],
+      decisions: { ...current.decisions, [nextManualId(current.detections)]: "pending" },
+    } : current);
+    setOutputUrl(null);
+    redactMutation.reset();
+    setManualEnd(manualStart);
   }
 
   function previewDetection(detection: AudioDetection) {
@@ -877,22 +1091,29 @@ function AudioWorkspace() {
   }
 
   async function exportAudio() {
-    if (!review) return;
+    if (!review || issue) return;
+    const version = reviewVersion.current;
     const detections = review.detections.map((detection) => ({
       id: detection.id,
+      type: detection.type,
       status: review.decisions[detection.id] as Exclude<ReviewStatus, "pending">,
       audioStartMs: detection.audioStartMs,
       audioEndMs: detection.audioEndMs,
     }));
-    const blob = await redactMutation.mutateAsync({
-      analysisId: review.analysisId,
-      file: review.file,
-      detections,
-    });
-    setOutputUrl(URL.createObjectURL(blob));
+    try {
+      const blob = await redactMutation.mutateAsync({
+        analysisId: review.analysisId,
+        file: review.file,
+        detections,
+      });
+      if (version === reviewVersion.current) setOutputUrl(URL.createObjectURL(blob));
+    } catch {
+      // The mutation error is shown below the export button.
+    }
   }
 
   const pending = review?.detections.filter(({ id }) => review.decisions[id] === "pending").length ?? 0;
+  const issue = review ? audioReviewIssue(review.detections.map((mark) => ({ ...mark, status: review.decisions[mark.id] ?? "pending" })), durationMs) : null;
 
   return (
     <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
@@ -1045,7 +1266,10 @@ function AudioWorkspace() {
         )}
 
         {fileUrl && (
-          <audio ref={audioRef} className="mt-5 w-full" controls src={fileUrl} preload="metadata">
+          <audio ref={audioRef} className="mt-5 w-full" controls src={fileUrl} preload="metadata" onLoadedMetadata={(event) => {
+            const seconds = event.currentTarget.duration;
+            if (Number.isFinite(seconds)) setDurationMs(Math.floor(seconds * 1000));
+          }}>
             Your browser does not support audio playback.
           </audio>
         )}
@@ -1081,7 +1305,7 @@ function AudioWorkspace() {
                       {pending > 0 ? `Review ${pending} remaining ${pending === 1 ? "item" : "items"}.` : "Ready to replace approved intervals with a beep."}
                     </p>
                   </div>
-                  <Button type="button" size="lg" disabled={pending > 0 || redactMutation.isPending} onClick={() => void exportAudio()}>
+                  <Button type="button" size="lg" disabled={Boolean(issue) || redactMutation.isPending} onClick={() => void exportAudio()}>
                     {redactMutation.isPending ? (
                       <LoadingLabel>Creating…</LoadingLabel>
                     ) : (
@@ -1092,6 +1316,7 @@ function AudioWorkspace() {
                     )}
                   </Button>
                 </div>
+                {issue && <p className="mt-2 text-sm text-destructive" role="alert">{issue}</p>}
                 <div className="mt-3"><ErrorMessage error={redactMutation.error} /></div>
 
                 {outputUrl && (
@@ -1101,7 +1326,7 @@ function AudioWorkspace() {
                         <p className="font-semibold">Protected audio is ready</p>
                         <p className="text-xs text-muted-foreground">Listen through before downloading.</p>
                       </div>
-                      <Button nativeButton={false} render={<a href={outputUrl} download="redacted.mp3" />}>
+                      <Button nativeButton={false} render={<a href={outputUrl} download="redacted.mp3" onClick={() => window.setTimeout(() => setOutputUrl((current) => current === outputUrl ? null : current), 1000)} />}>
                         <RiDownloadLine aria-hidden="true" />
                         Download
                       </Button>
@@ -1122,7 +1347,30 @@ function AudioWorkspace() {
               decisions={review.decisions}
               onDecision={updateDecision}
               onPreview={previewDetection}
+              onEdit={editMark}
             />
+            <div className="mt-5 rounded-2xl border bg-card p-4">
+              <p className="font-semibold">Add a missed audio interval</p>
+              <p className="mt-1 text-xs text-muted-foreground">Listen above, then set the start and end in seconds.</p>
+              <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                <label className="text-xs font-medium">Type
+                  <select value={manualType} onChange={(event) => setManualType(event.target.value as PiiType)} className="mt-1 h-10 w-full rounded-xl border bg-background px-2 text-sm focus:ring-2 focus:ring-ring">
+                    {piiTypeSchema.options.map((type) => <option key={type} value={type}>{formatEntityType(type)}</option>)}
+                  </select>
+                </label>
+                <label className="text-xs font-medium">Start (seconds)
+                  <input type="number" min="0" step="0.001" value={manualStart} onChange={(event) => setManualStart(event.target.value)} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
+                </label>
+                <label className="text-xs font-medium">End (seconds)
+                  <input type="number" min="0" step="0.001" value={manualEnd} onChange={(event) => setManualEnd(event.target.value)} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
+                </label>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button type="button" variant="ghost" onClick={() => setManualStart(audioRef.current?.currentTime.toFixed(3) ?? "0")}>Use player time for start</Button>
+                <Button type="button" variant="ghost" onClick={() => setManualEnd(audioRef.current?.currentTime.toFixed(3) ?? "0")}>Use player time for end</Button>
+                <Button type="button" variant="outline" disabled={manualStart === "" || manualEnd === "" || Number(manualStart) < 0 || Number(manualStart) >= Number(manualEnd) || (durationMs !== undefined && Number(manualEnd) * 1000 > durationMs)} onClick={addMark}>Add mark</Button>
+              </div>
+            </div>
           </div>
         </section>
       )}
