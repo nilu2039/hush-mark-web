@@ -22,11 +22,11 @@ import {
   RiUploadCloud2Line,
 } from "@remixicon/react";
 import { useForm } from "@tanstack/react-form";
-import { useCallback, useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type DragEvent, type PointerEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
-import { hasAudioSignal } from "@/lib/audio";
+import { audioOffsetFromPosition, hasAudioSignal } from "@/lib/audio";
 import { formatEntityType, textForDetection } from "@/lib/pii";
-import { apiOffset, audioReviewIssue, nextManualId, textReviewIssue } from "@/lib/review";
+import { apiOffset, audioReviewIssue, nextManualId, renderedSelection, textReviewIssue } from "@/lib/review";
 import {
   useAnalyzeAudioMutation,
   useAnalyzeDocumentMutation,
@@ -88,16 +88,18 @@ function HighlightedText({
   detections,
   decisions,
   onSelect,
+  selection,
 }: {
   text: string;
   detections: Detection[];
   decisions: Decisions;
   onSelect?: (detection: Detection) => void;
+  selection?: { start: number; end: number } | null;
 }) {
   const points = Array.from(text);
   const content: ReactNode[] = [];
   const valid = detections.filter(({ start, end }) => start >= 0 && start < end && end <= points.length);
-  const boundaries = [...new Set([0, points.length, ...valid.flatMap(({ start, end }) => [start, end])])].sort((a, b) => a - b);
+  const boundaries = [...new Set([0, points.length, ...valid.flatMap(({ start, end }) => [start, end]), ...(selection ? [selection.start, selection.end] : [])])].sort((a, b) => a - b);
   const priority = { approved: 3, pending: 2, rejected: 1 };
   const ranked = [...valid].sort((a, b) => priority[decisions[b.id] ?? "pending"] - priority[decisions[a.id] ?? "pending"]);
 
@@ -105,6 +107,10 @@ function HighlightedText({
     const start = boundaries[index];
     const end = boundaries[index + 1];
     const value = points.slice(start, end).join("");
+    if (selection && selection.start <= start && end <= selection.end) {
+      content.push(<mark key={`selection-${start}`} className="rounded bg-accent/60 text-foreground ring-2 ring-accent">{value}</mark>);
+      continue;
+    }
     const detection = ranked.find((mark) => mark.start <= start && mark.end >= end);
     if (!detection) {
       content.push(value);
@@ -145,6 +151,8 @@ function ReviewList({
   onDecision,
   onPreview,
   onEdit,
+  selectedRange,
+  selectedAudioRange,
   showOffsets = false,
 }: {
   text: string;
@@ -153,6 +161,8 @@ function ReviewList({
   onDecision: (id: string, status: Exclude<ReviewStatus, "pending">) => void;
   onPreview?: (detection: AudioDetection) => void;
   onEdit?: (id: string, change: Partial<Detection & AudioDetection>) => void;
+  selectedRange?: { start: number; end: number } | null;
+  selectedAudioRange?: { startMs: number; endMs: number } | null;
   showOffsets?: boolean;
 }) {
   if (detections.length === 0) {
@@ -235,6 +245,31 @@ function ReviewList({
                     <label className="text-xs font-medium">End (seconds)
                       <input type="number" min="0" step="0.001" defaultValue={audioDetection.audioEndMs / 1000} onBlur={(event) => onEdit(detection.id, { audioEndMs: Math.round(Number(event.target.value) * 1000) })} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
                     </label>
+                    {selectedAudioRange !== undefined && (
+                      <Button type="button" variant="outline" className="sm:col-span-3" disabled={!selectedAudioRange} onClick={() => {
+                        if (selectedAudioRange) onEdit(detection.id, { audioStartMs: selectedAudioRange.startMs, audioEndMs: selectedAudioRange.endMs });
+                      }}>
+                        Use selected audio interval
+                      </Button>
+                    )}
+                  </>
+                ) : selectedRange !== undefined ? (
+                  <>
+                    <Button type="button" variant="outline" className="sm:col-span-2 sm:self-end" disabled={!selectedRange} onClick={() => {
+                      if (selectedRange) onEdit(detection.id, selectedRange);
+                    }}>
+                      Use selected text as range
+                    </Button>
+                    {showOffsets && (
+                      <>
+                        <label className="text-xs font-medium">Start (character)
+                          <input type="number" min="0" step="1" value={detection.start} onChange={(event) => onEdit(detection.id, { start: Number(event.target.value) })} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
+                        </label>
+                        <label className="text-xs font-medium">End (exclusive)
+                          <input type="number" min="1" step="1" value={detection.end} onChange={(event) => onEdit(detection.id, { end: Number(event.target.value) })} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
+                        </label>
+                      </>
+                    )}
                   </>
                 ) : (
                   <>
@@ -324,39 +359,53 @@ function ReviewHeader({
   );
 }
 
-function AddTextMark({ text, onAdd, selectable = false }: { text: string; onAdd: (type: PiiType, start: number, end: number) => void; selectable?: boolean }) {
+function AddTextMark({ text, onAdd, selection, manualFallback = false }: { text: string; onAdd: (type: PiiType, start: number, end: number) => void; selection?: { start: number; end: number } | null; manualFallback?: boolean }) {
   const [type, setType] = useState<PiiType>("PERSON");
   const [start, setStart] = useState(0);
   const [end, setEnd] = useState(0);
+  const visual = selection !== undefined;
+  const selectedStart = visual ? selection?.start : start;
+  const selectedEnd = visual ? selection?.end : end;
   const length = Array.from(text).length;
   return (
     <div className="mt-5 rounded-2xl border bg-card p-4">
       <p className="font-semibold">Add a missed detail</p>
-      <p className="mt-1 text-xs text-muted-foreground">Enter its character range in the original text. The end is exclusive.</p>
-      {selectable && (
-        <textarea readOnly value={text} rows={3} aria-label="Select a missed detail in the original text" className="mt-3 w-full resize-y rounded-xl border bg-background p-3 text-sm focus:ring-2 focus:ring-ring" onSelect={(event) => {
-          const target = event.currentTarget;
-          setStart(apiOffset(text, target.selectionStart));
-          setEnd(apiOffset(text, target.selectionEnd));
-        }} />
-      )}
-      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+      <p className="mt-1 text-xs text-muted-foreground">{visual ? "Select the detail in the analyzed text to set its range." : "Enter its character range in the original text. The end is exclusive."}</p>
+      <div className={`mt-3 grid gap-2 ${visual ? "" : "sm:grid-cols-3"}`}>
         <label className="text-xs font-medium">Type
           <select value={type} onChange={(event) => setType(event.target.value as PiiType)} className="mt-1 h-10 w-full rounded-xl border bg-background px-2 text-sm focus:ring-2 focus:ring-ring">
             {piiTypeSchema.options.map((option) => <option key={option} value={option}>{formatEntityType(option)}</option>)}
           </select>
         </label>
-        <label className="text-xs font-medium">Start
-          <input type="number" min="0" max={length} step="1" value={start} onChange={(event) => setStart(Number(event.target.value))} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
-        </label>
-        <label className="text-xs font-medium">End
-          <input type="number" min="1" max={length} step="1" value={end} onChange={(event) => setEnd(Number(event.target.value))} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
-        </label>
+        {!visual && (
+          <>
+            <label className="text-xs font-medium">Start
+              <input type="number" min="0" max={length} step="1" value={start} onChange={(event) => setStart(Number(event.target.value))} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
+            </label>
+            <label className="text-xs font-medium">End
+              <input type="number" min="1" max={length} step="1" value={end} onChange={(event) => setEnd(Number(event.target.value))} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
+            </label>
+          </>
+        )}
       </div>
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-        <p className="max-w-64 truncate text-sm text-muted-foreground">{start < end ? `“${textForDetection(text, start, end)}”` : "Select a valid range."}</p>
-        <Button type="button" variant="outline" disabled={!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start >= end || end > length} onClick={() => { onAdd(type, start, end); setEnd(start); }}>Add mark</Button>
+        <p className="max-w-64 truncate text-sm text-muted-foreground">{selectedStart !== undefined && selectedEnd !== undefined && selectedStart < selectedEnd ? `“${textForDetection(text, selectedStart, selectedEnd)}” · ${selectedStart}–${selectedEnd}` : "Select a valid range."}</p>
+        <Button type="button" variant="outline" disabled={selectedStart === undefined || selectedEnd === undefined || !Number.isInteger(selectedStart) || !Number.isInteger(selectedEnd) || selectedStart < 0 || selectedStart >= selectedEnd || selectedEnd > length} onClick={() => { if (selectedStart !== undefined && selectedEnd !== undefined) onAdd(type, selectedStart, selectedEnd); if (!visual) setEnd(start); }}>Add mark</Button>
       </div>
+      {manualFallback && (
+        <details className="mt-3 border-t pt-3 text-sm">
+          <summary className="cursor-pointer text-muted-foreground">Enter character offsets instead</summary>
+          <div className="mt-3 flex flex-wrap items-end gap-2">
+            <label className="min-w-24 flex-1 text-xs font-medium">Start
+              <input type="number" min="0" max={length} step="1" value={start} onChange={(event) => setStart(Number(event.target.value))} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
+            </label>
+            <label className="min-w-24 flex-1 text-xs font-medium">End
+              <input type="number" min="1" max={length} step="1" value={end} onChange={(event) => setEnd(Number(event.target.value))} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
+            </label>
+            <Button type="button" variant="outline" disabled={!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start >= end || end > length} onClick={() => { onAdd(type, start, end); setEnd(start); }}>Add by offsets</Button>
+          </div>
+        </details>
+      )}
     </div>
   );
 }
@@ -365,9 +414,11 @@ function TextWorkspace() {
   const analyzeMutation = useAnalyzeTextMutation();
   const redactMutation = useRedactTextMutation();
   const reviewVersion = useRef(0);
+  const previewRef = useRef<HTMLDivElement>(null);
   const [review, setReview] = useState<
     (TextAnalysisResponse & { text: string; decisions: Decisions }) | null
   >(null);
+  const [selectedRange, setSelectedRange] = useState<{ start: number; end: number } | null>(null);
   const [redactedText, setRedactedText] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -377,6 +428,7 @@ function TextWorkspace() {
     onSubmit: async ({ value }) => {
       const version = ++reviewVersion.current;
       setReview(null);
+      setSelectedRange(null);
       setRedactedText(null);
       redactMutation.reset();
       const result = await analyzeMutation.mutateAsync(value);
@@ -384,6 +436,11 @@ function TextWorkspace() {
       setReview({ ...result, text: value.text, decisions: pendingDecisions(result.detections) });
     },
   });
+
+  function captureSelection() {
+    const offsets = review && renderedSelection(previewRef.current, review.text);
+    if (offsets) setSelectedRange(offsets);
+  }
 
   function updateDecision(id: string, status: Exclude<ReviewStatus, "pending">) {
     reviewVersion.current++;
@@ -423,6 +480,7 @@ function TextWorkspace() {
       decisions: { ...current.decisions, [nextManualId(current.detections)]: "pending" },
     } : current);
     setRedactedText(null);
+    setSelectedRange(null);
     redactMutation.reset();
   }
 
@@ -484,10 +542,19 @@ function TextWorkspace() {
                   aria-describedby={error ? "text-error" : undefined}
                   className="min-h-52 w-full resize-y rounded-2xl border bg-background px-4 py-4 text-[15px] leading-7 outline-none transition placeholder:text-muted-foreground/60 focus:border-primary/60 focus:ring-4 focus:ring-primary/10"
                   onBlur={field.handleBlur}
+                  onSelect={(event) => {
+                    if (!review || event.currentTarget.value !== review.text) return;
+                    const { selectionStart, selectionEnd } = event.currentTarget;
+                    if (selectionStart < selectionEnd) setSelectedRange({
+                      start: apiOffset(review.text, selectionStart),
+                      end: apiOffset(review.text, selectionEnd),
+                    });
+                  }}
                   onChange={(event) => {
                     field.handleChange(event.target.value);
                     reviewVersion.current++;
                     if (review && event.target.value !== review.text) setReview(null);
+                    setSelectedRange(null);
                     setRedactedText(null);
                     analyzeMutation.reset();
                     redactMutation.reset();
@@ -533,9 +600,11 @@ function TextWorkspace() {
           <div className="min-w-0">
             <div className="sticky top-6 rounded-3xl border bg-card p-5 shadow-sm sm:p-6">
               <p className="mb-3 text-xs font-semibold tracking-widest text-primary uppercase">Analyzed text</p>
-              <div className="max-h-96 overflow-auto whitespace-pre-wrap rounded-2xl bg-muted/55 p-4 text-[15px] leading-8">
-                <HighlightedText text={review.text} detections={review.detections} decisions={review.decisions} />
+              <div ref={previewRef} className="max-h-96 overflow-auto whitespace-pre-wrap rounded-2xl bg-muted/55 p-4 text-[15px] leading-8" onPointerUp={() => window.setTimeout(captureSelection, 0)} onKeyUp={captureSelection}>
+                <HighlightedText text={review.text} detections={review.detections} decisions={review.decisions} selection={selectedRange} />
               </div>
+              <p className="mt-2 text-xs text-muted-foreground">Drag across any text above to select a missed detail, then add its mark.</p>
+              <AddTextMark text={review.text} onAdd={addMark} selection={selectedRange} />
 
               <div className="mt-5 border-t pt-5">
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -574,8 +643,8 @@ function TextWorkspace() {
               decisions={review.decisions}
               onDecision={updateDecision}
               onEdit={editMark}
+              selectedRange={selectedRange}
             />
-            <AddTextMark text={review.text} onAdd={addMark} selectable />
           </div>
         </section>
       )}
@@ -587,11 +656,13 @@ function DocumentWorkspace() {
   const analyzeMutation = useAnalyzeDocumentMutation();
   const redactMutation = useRedactDocumentMutation();
   const inputRef = useRef<HTMLInputElement>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
   const selectedFileRef = useRef<File | null>(null);
   const reviewVersion = useRef(0);
   const manualIdsRef = useRef<{ id: string }[]>([]);
   const [reviewFile, setReviewFile] = useState<File | null>(null);
   const [marks, setMarks] = useState<Detection[]>([]);
+  const [selectedRange, setSelectedRange] = useState<{ start: number; end: number } | null>(null);
   const [decisions, setDecisions] = useState<Decisions>({});
   const [outputUrl, setOutputUrl] = useState<string | null>(null);
   const analysis = reviewFile ? analyzeMutation.data : undefined;
@@ -609,6 +680,7 @@ function DocumentWorkspace() {
       setReviewFile(null);
       manualIdsRef.current = [];
       setMarks([]);
+      setSelectedRange(null);
       setDecisions({});
       setOutputUrl(null);
       redactMutation.reset();
@@ -620,6 +692,11 @@ function DocumentWorkspace() {
     },
   });
 
+  function captureSelection() {
+    const offsets = analysis && renderedSelection(previewRef.current, analysis.text);
+    if (offsets) setSelectedRange(offsets);
+  }
+
   function chooseFile(file: File) {
     selectedFileRef.current = file;
     reviewVersion.current += 1;
@@ -628,6 +705,7 @@ function DocumentWorkspace() {
     setReviewFile(null);
     manualIdsRef.current = [];
     setMarks([]);
+    setSelectedRange(null);
     setDecisions({});
     setOutputUrl(null);
     analyzeMutation.reset();
@@ -662,6 +740,7 @@ function DocumentWorkspace() {
     manualIdsRef.current.push({ id });
     setMarks((current) => [...current, { id, type, start, end, status: "pending", confidence: 1, source: "manual" }]);
     setDecisions((current) => ({ ...current, [id]: "pending" }));
+    setSelectedRange(null);
     setOutputUrl(null);
     redactMutation.reset();
   }
@@ -768,14 +847,16 @@ function DocumentWorkspace() {
           <div className="min-w-0">
             <div className="sticky top-6 rounded-3xl border bg-card p-5 shadow-sm sm:p-6">
               <p className="mb-3 text-xs font-semibold tracking-widest text-primary uppercase">Document text</p>
-              <div className="max-h-96 overflow-auto whitespace-pre-wrap rounded-2xl bg-muted/55 p-4 text-[15px] leading-8">
+              <div ref={previewRef} className="max-h-96 overflow-auto whitespace-pre-wrap rounded-2xl bg-muted/55 p-4 text-[15px] leading-8" onPointerUp={() => window.setTimeout(captureSelection, 0)} onKeyUp={captureSelection}>
                 <HighlightedText
                   text={analysis.text}
                   detections={marks}
                   decisions={decisions}
+                  selection={selectedRange}
                 />
               </div>
-              <p className="mt-3 text-xs text-muted-foreground">Offsets count Unicode characters; the end is exclusive. Check for any missed sensitive details.</p>
+              <p className="mt-3 text-xs text-muted-foreground">Drag across document text to select a detail. Ranges use Unicode characters in the original file, including CRLF line endings.</p>
+              <AddTextMark text={analysis.text} onAdd={addMark} selection={selectedRange} manualFallback />
               <div className="mt-5 border-t pt-5">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
@@ -804,11 +885,80 @@ function DocumentWorkspace() {
           </div>
           <div>
             <ReviewHeader detections={marks} decisions={decisions} onSetAll={setAll} />
-            <ReviewList text={analysis.text} detections={marks} decisions={decisions} onDecision={updateDecision} onEdit={editMark} showOffsets />
-            <AddTextMark text={analysis.text} onAdd={addMark} />
+            <ReviewList text={analysis.text} detections={marks} decisions={decisions} onDecision={updateDecision} onEdit={editMark} selectedRange={selectedRange} showOffsets />
           </div>
         </section>
       )}
+    </div>
+  );
+}
+
+function AudioRangeSelector({
+  durationMs,
+  marks,
+  decisions,
+  selection,
+  playheadMs,
+  onChange,
+}: {
+  durationMs: number;
+  marks: AudioDetection[];
+  decisions: Decisions;
+  selection: { startMs: number; endMs: number } | null;
+  playheadMs: number;
+  onChange: (startMs: number, endMs: number) => void;
+}) {
+  const anchor = useRef<number | null>(null);
+
+  function offset(event: PointerEvent<HTMLDivElement>) {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    return audioOffsetFromPosition(event.clientX - bounds.left, bounds.width, durationMs);
+  }
+
+  function update(event: PointerEvent<HTMLDivElement>) {
+    if (anchor.current === null) return;
+    const position = offset(event);
+    onChange(Math.min(anchor.current, position), Math.max(anchor.current, position));
+  }
+
+  return (
+    <div>
+      <p className="mb-2 text-xs text-muted-foreground">Drag across the recording timeline to select an interval.</p>
+      <div
+        className="relative h-12 cursor-crosshair touch-none overflow-hidden rounded-xl border bg-muted"
+        aria-label="Recording timeline. Drag to select an interval; use the time fields below for keyboard adjustments."
+        role="group"
+        onPointerDown={(event) => {
+          event.preventDefault();
+          event.currentTarget.setPointerCapture(event.pointerId);
+          anchor.current = offset(event);
+          onChange(anchor.current, anchor.current);
+        }}
+        onPointerMove={update}
+        onPointerUp={(event) => {
+          update(event);
+          anchor.current = null;
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+        }}
+        onPointerCancel={() => { anchor.current = null; }}
+      >
+        {marks.filter(({ audioStartMs, audioEndMs }) => audioStartMs < audioEndMs).map((mark) => (
+          <span
+            key={mark.id}
+            className={`pointer-events-none absolute inset-y-3 rounded ${decisions[mark.id] === "approved" ? "bg-primary/45" : decisions[mark.id] === "rejected" ? "bg-muted-foreground/25" : "bg-accent/55"}`}
+            style={{ left: `${(mark.audioStartMs / durationMs) * 100}%`, width: `${((mark.audioEndMs - mark.audioStartMs) / durationMs) * 100}%` }}
+          />
+        ))}
+        {selection && (
+          <span className="pointer-events-none absolute inset-y-0 rounded border-2 border-primary bg-primary/20" style={{ left: `${(selection.startMs / durationMs) * 100}%`, width: `${((selection.endMs - selection.startMs) / durationMs) * 100}%` }} />
+        )}
+        <span className="pointer-events-none absolute inset-y-0 w-0.5 bg-foreground/70" style={{ left: `${(playheadMs / durationMs) * 100}%` }} />
+      </div>
+      <div className="mt-1 flex justify-between text-xs text-muted-foreground">
+        <span>0:00</span>
+        <span>{selection ? `${(selection.startMs / 1000).toFixed(2)}–${(selection.endMs / 1000).toFixed(2)}s selected` : "Select a range"}</span>
+        <span>{(durationMs / 1000).toFixed(2)}s</span>
+      </div>
     </div>
   );
 }
@@ -831,6 +981,7 @@ function AudioWorkspace() {
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [outputUrl, setOutputUrl] = useState<string | null>(null);
   const [durationMs, setDurationMs] = useState<number | undefined>(undefined);
+  const [playheadMs, setPlayheadMs] = useState(0);
   const [manualType, setManualType] = useState<PiiType>("PERSON");
   const [manualStart, setManualStart] = useState("0");
   const [manualEnd, setManualEnd] = useState("0");
@@ -851,6 +1002,8 @@ function AudioWorkspace() {
       const version = ++reviewVersion.current;
       setReview(null);
       setOutputUrl(null);
+      setManualStart("0");
+      setManualEnd("0");
       redactMutation.reset();
       const result = await analyzeMutation.mutateAsync(value.file);
       if (version !== reviewVersion.current || selectedAudioRef.current !== value.file) return;
@@ -944,6 +1097,7 @@ function AudioWorkspace() {
     setFileUrl(URL.createObjectURL(file));
     setOutputUrl(null);
     setDurationMs(undefined);
+    setPlayheadMs(0);
     setManualStart("0");
     setManualEnd("0");
     setReview(null);
@@ -1078,6 +1232,11 @@ function AudioWorkspace() {
     setManualEnd(manualStart);
   }
 
+  function selectAudioRange(startMs: number, endMs: number) {
+    setManualStart((startMs / 1000).toFixed(3));
+    setManualEnd((endMs / 1000).toFixed(3));
+  }
+
   function previewDetection(detection: AudioDetection) {
     const player = audioRef.current;
     if (!player) return;
@@ -1114,6 +1273,11 @@ function AudioWorkspace() {
 
   const pending = review?.detections.filter(({ id }) => review.decisions[id] === "pending").length ?? 0;
   const issue = review ? audioReviewIssue(review.detections.map((mark) => ({ ...mark, status: review.decisions[mark.id] ?? "pending" })), durationMs) : null;
+  const selectedStartMs = Math.round(Number(manualStart) * 1000);
+  const selectedEndMs = Math.round(Number(manualEnd) * 1000);
+  const selectedAudioRange = manualStart !== "" && manualEnd !== "" && selectedStartMs >= 0 && selectedStartMs < selectedEndMs && (durationMs === undefined || selectedEndMs <= durationMs)
+    ? { startMs: selectedStartMs, endMs: selectedEndMs }
+    : null;
 
   return (
     <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
@@ -1265,10 +1429,10 @@ function AudioWorkspace() {
           </div>
         )}
 
-        {fileUrl && (
+        {fileUrl && !review && (
           <audio ref={audioRef} className="mt-5 w-full" controls src={fileUrl} preload="metadata" onLoadedMetadata={(event) => {
             const seconds = event.currentTarget.duration;
-            if (Number.isFinite(seconds)) setDurationMs(Math.floor(seconds * 1000));
+            if (Number.isFinite(seconds)) setDurationMs(Math.round(seconds * 1000));
           }}>
             Your browser does not support audio playback.
           </audio>
@@ -1284,6 +1448,17 @@ function AudioWorkspace() {
           <div className="min-w-0">
             <div className="sticky top-6 rounded-3xl border bg-card p-5 shadow-sm sm:p-6">
               <p className="mb-3 text-xs font-semibold tracking-widest text-primary uppercase">Transcript</p>
+              {fileUrl && (
+                <audio ref={audioRef} className="mb-4 w-full" controls src={fileUrl} preload="metadata" onTimeUpdate={(event) => setPlayheadMs(Math.round(event.currentTarget.currentTime * 1000))} onLoadedMetadata={(event) => {
+                  const seconds = event.currentTarget.duration;
+                  if (Number.isFinite(seconds)) setDurationMs(Math.round(seconds * 1000));
+                }}>
+                  Your browser does not support audio playback.
+                </audio>
+              )}
+              {durationMs !== undefined && durationMs > 0 && (
+                <AudioRangeSelector durationMs={durationMs} marks={review.detections} decisions={review.decisions} selection={selectedAudioRange} playheadMs={playheadMs} onChange={selectAudioRange} />
+              )}
               <div className="max-h-96 overflow-auto whitespace-pre-wrap rounded-2xl bg-muted/55 p-4 text-[15px] leading-8">
                 <HighlightedText
                   text={review.transcript}
@@ -1341,17 +1516,9 @@ function AudioWorkspace() {
           </div>
           <div>
             <ReviewHeader detections={review.detections} decisions={review.decisions} onSetAll={setAll} />
-            <ReviewList
-              text={review.transcript}
-              detections={review.detections}
-              decisions={review.decisions}
-              onDecision={updateDecision}
-              onPreview={previewDetection}
-              onEdit={editMark}
-            />
-            <div className="mt-5 rounded-2xl border bg-card p-4">
+            <div className="mb-5 rounded-2xl border bg-card p-4">
               <p className="font-semibold">Add a missed audio interval</p>
-              <p className="mt-1 text-xs text-muted-foreground">Listen above, then set the start and end in seconds.</p>
+              <p className="mt-1 text-xs text-muted-foreground">Drag across the timeline while listening. Adjust the times below if needed.</p>
               <div className="mt-3 grid gap-2 sm:grid-cols-3">
                 <label className="text-xs font-medium">Type
                   <select value={manualType} onChange={(event) => setManualType(event.target.value as PiiType)} className="mt-1 h-10 w-full rounded-xl border bg-background px-2 text-sm focus:ring-2 focus:ring-ring">
@@ -1368,9 +1535,18 @@ function AudioWorkspace() {
               <div className="mt-3 flex flex-wrap gap-2">
                 <Button type="button" variant="ghost" onClick={() => setManualStart(audioRef.current?.currentTime.toFixed(3) ?? "0")}>Use player time for start</Button>
                 <Button type="button" variant="ghost" onClick={() => setManualEnd(audioRef.current?.currentTime.toFixed(3) ?? "0")}>Use player time for end</Button>
-                <Button type="button" variant="outline" disabled={manualStart === "" || manualEnd === "" || Number(manualStart) < 0 || Number(manualStart) >= Number(manualEnd) || (durationMs !== undefined && Number(manualEnd) * 1000 > durationMs)} onClick={addMark}>Add mark</Button>
+                <Button type="button" variant="outline" disabled={!selectedAudioRange} onClick={addMark}>Add mark</Button>
               </div>
             </div>
+            <ReviewList
+              text={review.transcript}
+              detections={review.detections}
+              decisions={review.decisions}
+              onDecision={updateDecision}
+              onPreview={previewDetection}
+              onEdit={editMark}
+              selectedAudioRange={selectedAudioRange}
+            />
           </div>
         </section>
       )}

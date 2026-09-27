@@ -12,6 +12,26 @@ export function apiOffset(text: string, utf16Offset: number) {
   return Array.from(text.slice(0, utf16Offset)).length;
 }
 
+export function selectionOffsets(text: string, startPrefix: string, endPrefix: string) {
+  if (!text.startsWith(startPrefix) || !text.startsWith(endPrefix) || startPrefix.length >= endPrefix.length) return null;
+  return { start: apiOffset(text, startPrefix.length), end: apiOffset(text, endPrefix.length) };
+}
+
+export function renderedSelection(root: HTMLDivElement | null, text: string) {
+  const selection = window.getSelection();
+  if (!root || !selection || selection.isCollapsed || !selection.rangeCount || root.textContent !== text) return null;
+  const selected = selection.getRangeAt(0);
+  if (!root.contains(selected.startContainer) || !root.contains(selected.endContainer)) return null;
+
+  const prefix = document.createRange();
+  prefix.selectNodeContents(root);
+  prefix.setEnd(selected.startContainer, selected.startOffset);
+  const startPrefix = prefix.cloneContents().textContent ?? "";
+  prefix.setEnd(selected.endContainer, selected.endOffset);
+  const endPrefix = prefix.cloneContents().textContent ?? "";
+  return selectionOffsets(text, startPrefix, endPrefix);
+}
+
 type Mark = { id: string; status: ReviewStatus };
 
 function commonIssue(marks: Mark[]) {
