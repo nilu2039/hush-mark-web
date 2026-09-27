@@ -40,6 +40,7 @@ Unless stated otherwise, paths in this document are relative to `src/`.
 - Keep the Axios instance in `lib/api.ts`.
 - Keep validated request functions in `lib/api-requests.ts`.
 - Keep Zod request and response schemas in `schema/`.
+- Derive every API request function's input type from its Zod schema, and validate the input before building or sending the request. Do not hand-write parameter object types.
 - Keep React Query keys in `lib/query-keys.ts`.
 - Keep React Query hooks in `queries/index.ts` and mutations in `mutations/index.ts`.
 - Define shared paging fields in `PaginationRequestSchema` and extend it for endpoint-specific request schemas instead of redefining `page` and `pageSize`.

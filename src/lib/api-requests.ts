@@ -5,11 +5,17 @@ import {
   apiErrorSchema,
   audioAnalysisResponseSchema,
   audioFileSchema,
+  documentAnalysisResponseSchema,
+  documentFileSchema,
+  redactDocumentRequestSchema,
   redactAudioRequestSchema,
   textAnalysisResponseSchema,
+  textFormSchema,
   type AnalyzeAudioInput,
+  type AnalyzeDocumentInput,
   type AnalyzeTextInput,
   type RedactAudioRequest,
+  type RedactDocumentRequest,
 } from "@/schema/hushmark";
 
 export class ApiRequestError extends Error {
@@ -46,7 +52,8 @@ async function toApiError(error: unknown) {
 }
 
 export async function analyzeText(input: AnalyzeTextInput) {
-  const request = analyzeTextRequestSchema.parse({ ...input, locale: "en-IN" });
+  const validatedInput = textFormSchema.parse(input);
+  const request = analyzeTextRequestSchema.parse({ ...validatedInput, locale: "en-IN" });
   try {
     const { data } = await api.post("/analyze", request);
     return textAnalysisResponseSchema.parse(data);
@@ -81,6 +88,33 @@ export async function redactAudio(input: RedactAudioRequest) {
     const { data } = await api.post<Blob>("/redact/audio", form, {
       responseType: "blob",
     });
+    return data;
+  } catch (error) {
+    throw await toApiError(error);
+  }
+}
+
+export async function analyzeDocument(file: AnalyzeDocumentInput) {
+  const validatedFile = documentFileSchema.parse(file);
+  const form = new FormData();
+  form.append("file", validatedFile, validatedFile.name);
+
+  try {
+    const { data } = await api.post("/analyze/document", form);
+    return documentAnalysisResponseSchema.parse(data);
+  } catch (error) {
+    throw await toApiError(error);
+  }
+}
+
+export async function redactDocument(input: RedactDocumentRequest) {
+  const request = redactDocumentRequestSchema.parse(input);
+  const form = new FormData();
+  form.append("file", request.file, request.file.name);
+  form.append("review", JSON.stringify({ analysisId: request.analysisId, detections: request.detections }));
+
+  try {
+    const { data } = await api.post<Blob>("/redact/document", form, { responseType: "blob" });
     return data;
   } catch (error) {
     throw await toApiError(error);

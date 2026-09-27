@@ -1,5 +1,5 @@
 import { useMutation } from "@tanstack/react-query";
-import { analyzeAudio, analyzeText, redactAudio } from "@/lib/api-requests";
+import { analyzeAudio, analyzeDocument, analyzeText, redactAudio, redactDocument } from "@/lib/api-requests";
 import { mutationKeys } from "@/lib/query-keys";
 
 export function useAnalyzeTextMutation() {
@@ -12,4 +12,12 @@ export function useAnalyzeAudioMutation() {
 
 export function useRedactAudioMutation() {
   return useMutation({ mutationKey: mutationKeys.redactAudio, mutationFn: redactAudio });
+}
+
+export function useAnalyzeDocumentMutation() {
+  return useMutation({ mutationKey: mutationKeys.analyzeDocument, mutationFn: analyzeDocument });
+}
+
+export function useRedactDocumentMutation() {
+  return useMutation({ mutationKey: mutationKeys.redactDocument, mutationFn: redactDocument });
 }

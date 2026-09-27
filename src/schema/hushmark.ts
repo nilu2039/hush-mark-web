@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const MAX_TEXT_LENGTH = 50_000;
 export const MAX_AUDIO_SIZE = 25 * 1024 * 1024;
+export const MAX_DOCUMENT_SIZE = 256 * 1024;
 export const SUPPORTED_AUDIO_EXTENSIONS = [
   "flac",
   "m4a",
@@ -80,6 +81,46 @@ export const audioFileSchema = z
 
 export const audioFormSchema = z.object({ file: audioFileSchema });
 
+export const documentFileSchema = z
+  .custom<File>((file) => typeof File !== "undefined" && file instanceof File, {
+    message: "Choose a text document.",
+  })
+  .refine((file) => file.size > 0, "Choose a non-empty text document.")
+  .refine((file) => file.size <= MAX_DOCUMENT_SIZE, "Text documents must be at most 256 KiB.")
+  .refine((file) => /\.(txt|md|markdown)$/i.test(file.name), "Use a .txt, .md, or .markdown file.");
+
+export const documentFormSchema = z.object({ file: documentFileSchema });
+
+export const documentAnalysisResponseSchema = textAnalysisResponseSchema.extend({
+  text: z.string(),
+  detections: z.array(detectionSchema.extend({ status: z.literal("pending") })),
+}).superRefine((analysis, context) => {
+  if (Array.from(analysis.text).length !== analysis.textLength) {
+    context.addIssue({ code: "custom", message: "Document text length does not match its analysis." });
+  }
+  const ids = new Set<string>();
+  let end = 0;
+  for (const detection of [...analysis.detections].sort((a, b) => a.start - b.start)) {
+    if (ids.has(detection.id) || detection.start < end || detection.end > analysis.textLength || detection.start >= detection.end) {
+      context.addIssue({ code: "custom", message: "Document detections contain invalid spans." });
+      break;
+    }
+    ids.add(detection.id);
+    end = detection.end;
+  }
+});
+
+export const redactDocumentRequestSchema = z.object({
+  file: documentFileSchema,
+  analysisId: z.string().min(1),
+  detections: z.array(detectionSchema.pick({
+    id: true,
+    type: true,
+    start: true,
+    end: true,
+  }).extend({ status: reviewStatusSchema.exclude(["pending"]) }).strict()),
+});
+
 export const redactAudioRequestSchema = z.object({
   analysisId: z.string().min(1),
   file: audioFileSchema,
@@ -99,4 +140,7 @@ export type TextAnalysisResponse = z.infer<typeof textAnalysisResponseSchema>;
 export type AudioAnalysisResponse = z.infer<typeof audioAnalysisResponseSchema>;
 export type AnalyzeTextInput = z.infer<typeof textFormSchema>;
 export type AnalyzeAudioInput = z.infer<typeof audioFileSchema>;
+export type AnalyzeDocumentInput = z.infer<typeof documentFileSchema>;
 export type RedactAudioRequest = z.infer<typeof redactAudioRequestSchema>;
+export type DocumentAnalysisResponse = z.infer<typeof documentAnalysisResponseSchema>;
+export type RedactDocumentRequest = z.infer<typeof redactDocumentRequestSchema>;

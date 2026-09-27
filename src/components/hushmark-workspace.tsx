@@ -7,6 +7,7 @@ import {
   RiCloseLine,
   RiDownloadLine,
   RiFileCopyLine,
+  RiFileTextLine,
   RiFileMusicLine,
   RiInformationLine,
   RiLoader4Line,
@@ -27,11 +28,14 @@ import { hasAudioSignal } from "@/lib/audio";
 import { formatEntityType, redactText, textForDetection } from "@/lib/pii";
 import {
   useAnalyzeAudioMutation,
+  useAnalyzeDocumentMutation,
   useAnalyzeTextMutation,
   useRedactAudioMutation,
+  useRedactDocumentMutation,
 } from "@/mutations";
 import {
   audioFormSchema,
+  documentFormSchema,
   MAX_TEXT_LENGTH,
   textFormSchema,
   type AudioAnalysisResponse,
@@ -41,7 +45,7 @@ import {
   type TextAnalysisResponse,
 } from "@/schema/hushmark";
 
-type Mode = "text" | "audio";
+type Mode = "text" | "document" | "audio";
 type Decisions = Record<string, ReviewStatus>;
 
 function pendingDecisions(detections: Detection[]): Decisions {
@@ -131,12 +135,14 @@ function ReviewList({
   decisions,
   onDecision,
   onPreview,
+  showOffsets = false,
 }: {
   text: string;
   detections: Detection[];
   decisions: Decisions;
   onDecision: (id: string, status: Exclude<ReviewStatus, "pending">) => void;
   onPreview?: (detection: AudioDetection) => void;
+  showOffsets?: boolean;
 }) {
   if (detections.length === 0) {
     return (
@@ -172,8 +178,13 @@ function ReviewList({
                     {formatEntityType(detection.type)}
                   </span>
                   <span className="text-xs text-muted-foreground">
-                    {Math.round(detection.confidence * 100)}% match · {detection.source}
+                    {showOffsets ? "Confidence " : ""}{Math.round(detection.confidence * 100)}%{showOffsets ? "" : " match"} · {detection.source}
                   </span>
+                  {showOffsets && (
+                    <span className="text-xs text-muted-foreground">
+                      Span {detection.start}–{detection.end} · {status ?? "pending"}
+                    </span>
+                  )}
                   {audioDetection && (
                     <span className="text-xs text-muted-foreground">
                       {(audioDetection.audioStartMs / 1000).toFixed(1)}–
@@ -238,7 +249,7 @@ function ReviewHeader({
   decisions: Decisions;
   onSetAll: (status: Exclude<ReviewStatus, "pending">) => void;
 }) {
-  const reviewed = detections.filter((detection) => decisions[detection.id] !== "pending").length;
+  const reviewed = detections.filter((detection) => decisions[detection.id] === "approved" || decisions[detection.id] === "rejected").length;
   const percent = detections.length ? (reviewed / detections.length) * 100 : 100;
 
   return (
@@ -428,6 +439,207 @@ function TextWorkspace() {
               decisions={review.decisions}
               onDecision={updateDecision}
             />
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+function DocumentWorkspace() {
+  const analyzeMutation = useAnalyzeDocumentMutation();
+  const redactMutation = useRedactDocumentMutation();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const selectedFileRef = useRef<File | null>(null);
+  const reviewVersion = useRef(0);
+  const [reviewFile, setReviewFile] = useState<File | null>(null);
+  const [decisions, setDecisions] = useState<Decisions>({});
+  const [outputUrl, setOutputUrl] = useState<string | null>(null);
+  const analysis = reviewFile ? analyzeMutation.data : undefined;
+
+  useEffect(() => () => {
+    if (outputUrl) URL.revokeObjectURL(outputUrl);
+  }, [outputUrl]);
+
+  const form = useForm({
+    defaultValues: { file: null as File | null },
+    validators: { onSubmit: documentFormSchema },
+    onSubmit: async ({ value }) => {
+      if (!value.file) return;
+      const version = ++reviewVersion.current;
+      setReviewFile(null);
+      setDecisions({});
+      setOutputUrl(null);
+      const result = await analyzeMutation.mutateAsync(value.file);
+      if (selectedFileRef.current !== value.file || version !== reviewVersion.current) return;
+      setReviewFile(value.file);
+      setDecisions(pendingDecisions(result.detections));
+    },
+  });
+
+  function chooseFile(file: File) {
+    selectedFileRef.current = file;
+    reviewVersion.current += 1;
+    form.setFieldValue("file", file);
+    form.validateField("file", "change");
+    setReviewFile(null);
+    setDecisions({});
+    setOutputUrl(null);
+    analyzeMutation.reset();
+    redactMutation.reset();
+  }
+
+  function updateDecision(id: string, status: Exclude<ReviewStatus, "pending">) {
+    reviewVersion.current += 1;
+    setDecisions((current) => ({ ...current, [id]: status }));
+    setOutputUrl(null);
+    redactMutation.reset();
+  }
+
+  function setAll(status: Exclude<ReviewStatus, "pending">) {
+    if (!analysis) return;
+    reviewVersion.current += 1;
+    setDecisions(Object.fromEntries(analysis.detections.map(({ id }) => [id, status])));
+    setOutputUrl(null);
+    redactMutation.reset();
+  }
+
+  async function exportDocument() {
+    if (!analysis || !reviewFile) return;
+    const version = reviewVersion.current;
+    const detections = analysis.detections.map(({ id, type, start, end }) => ({
+      id,
+      type,
+      start,
+      end,
+      status: decisions[id] as Exclude<ReviewStatus, "pending">,
+    }));
+    try {
+      const blob = await redactMutation.mutateAsync({
+        file: reviewFile,
+        analysisId: analysis.analysisId,
+        detections,
+      });
+      if (version === reviewVersion.current) setOutputUrl(URL.createObjectURL(blob));
+    } catch {
+      // The mutation error is shown below the export button.
+    }
+  }
+
+  const pending = analysis?.detections.filter(({ id }) => decisions[id] !== "approved" && decisions[id] !== "rejected").length ?? 0;
+  const extension = reviewFile?.name.match(/\.(txt|md|markdown)$/i)?.[0] ?? ".txt";
+
+  return (
+    <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
+      <form
+        className="rounded-3xl border bg-card p-4 shadow-xl shadow-primary/5 sm:p-6"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void form.handleSubmit();
+        }}
+      >
+        <div className="mb-4">
+          <h2 className="font-semibold">Upload a text document</h2>
+          <p className="mt-1 text-sm text-muted-foreground">Choose a UTF-8 .txt, .md, or .markdown file up to 256 KiB.</p>
+        </div>
+        <form.Field name="file">
+          {(field) => {
+            const error = field.state.meta.isTouched ? fieldError(field.state.meta.errors) : null;
+            return (
+              <div>
+                <input
+                  ref={inputRef}
+                  type="file"
+                  className="sr-only"
+                  accept=".txt,.md,.markdown"
+                  aria-label="Text document"
+                  onBlur={field.handleBlur}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) chooseFile(file);
+                  }}
+                />
+                <div
+                  className="rounded-2xl border border-dashed bg-background p-6 text-center transition hover:border-primary/50 hover:bg-primary/3 sm:p-9"
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    const file = event.dataTransfer.files[0];
+                    if (file) chooseFile(file);
+                  }}
+                >
+                  {field.state.value ? (
+                    <div className="mx-auto flex max-w-lg items-center gap-4 rounded-2xl border bg-card p-4 text-left shadow-sm">
+                      <RiFileTextLine className="size-6 shrink-0 text-primary" aria-hidden="true" />
+                      <p className="min-w-0 flex-1 truncate font-medium">{field.state.value.name}</p>
+                      <Button type="button" variant="ghost" onClick={() => inputRef.current?.click()}>Replace</Button>
+                    </div>
+                  ) : (
+                    <>
+                      <RiUploadCloud2Line className="mx-auto size-10 text-primary" aria-hidden="true" />
+                      <p className="mt-3 font-medium">Drop a text document here</p>
+                      <Button type="button" variant="outline" className="mt-4" onClick={() => inputRef.current?.click()}>Browse files</Button>
+                    </>
+                  )}
+                </div>
+                <p className="mt-2 min-h-5 text-xs text-destructive">{error}</p>
+              </div>
+            );
+          }}
+        </form.Field>
+        <div className="flex justify-end">
+          <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting, state.values.file] as const}>
+            {([canSubmit, isSubmitting, file]) => (
+              <Button type="submit" size="lg" disabled={!canSubmit || isSubmitting || !file}>
+                {isSubmitting ? <LoadingLabel>Analyzing…</LoadingLabel> : <><RiSparklingLine aria-hidden="true" />Analyze document</>}
+              </Button>
+            )}
+          </form.Subscribe>
+        </div>
+        <div className="mt-4"><ErrorMessage error={analyzeMutation.error} /></div>
+      </form>
+
+      {analysis && (
+        <section className="mt-8 grid gap-6 lg:grid-cols-[minmax(0,1.05fr)_minmax(340px,0.95fr)]">
+          <div className="min-w-0">
+            <div className="sticky top-6 rounded-3xl border bg-card p-5 shadow-sm sm:p-6">
+              <p className="mb-3 text-xs font-semibold tracking-widest text-primary uppercase">Document text</p>
+              <div className="max-h-96 overflow-auto whitespace-pre-wrap rounded-2xl bg-muted/55 p-4 text-[15px] leading-8">
+                <HighlightedText
+                  text={analysis.text}
+                  detections={[...analysis.detections].sort((a, b) => a.start - b.start)}
+                  decisions={decisions}
+                />
+              </div>
+              <p className="mt-3 text-xs text-muted-foreground">Offsets count Unicode characters; the end is exclusive. Check for any missed sensitive details.</p>
+              <div className="mt-5 border-t pt-5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="font-semibold">Create protected document</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {pending ? `Review ${pending} remaining ${pending === 1 ? "item" : "items"}.` : "All detections reviewed."}
+                    </p>
+                  </div>
+                  <Button type="button" size="lg" disabled={pending > 0 || redactMutation.isPending} onClick={() => void exportDocument()}>
+                    {redactMutation.isPending ? <LoadingLabel>Creating…</LoadingLabel> : <><RiShieldCheckFill aria-hidden="true" />Create file</>}
+                  </Button>
+                </div>
+                <div className="mt-3"><ErrorMessage error={redactMutation.error} /></div>
+                {outputUrl && (
+                  <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-primary/20 bg-primary/6 p-4">
+                    <p className="font-semibold">Protected document is ready</p>
+                    <Button nativeButton={false} render={<a href={outputUrl} download={`redacted${extension}`} />}>
+                      <RiDownloadLine aria-hidden="true" />Download
+                    </Button>
+                  </div>
+                )}
+                <p className="mt-3 text-xs text-muted-foreground">If any PII was missed, do not share the export. Manual spans are not supported. Inspect the downloaded file before sharing, especially Markdown formatting.</p>
+              </div>
+            </div>
+          </div>
+          <div>
+            <ReviewHeader detections={analysis.detections} decisions={decisions} onSetAll={setAll} />
+            <ReviewList text={analysis.text} detections={analysis.detections} decisions={decisions} onDecision={updateDecision} showOffsets />
           </div>
         </section>
       )}
@@ -953,11 +1165,11 @@ export function HushmarkWorkspace() {
             <span className="block text-primary">Share with confidence.</span>
           </h1>
           <p className="mx-auto mt-5 max-w-2xl text-base leading-7 text-muted-foreground sm:text-lg">
-            Find personal information in text or speech, review every match, and decide exactly what gets hidden.
+            Find personal information in text, documents, or speech, review every match, and decide exactly what gets hidden.
           </p>
         </section>
 
-        <div className="mx-auto mb-6 grid max-w-md grid-cols-2 rounded-2xl border bg-muted/70 p-1.5" role="tablist" aria-label="Input type">
+        <div className="mx-auto mb-6 grid max-w-lg grid-cols-3 rounded-2xl border bg-muted/70 p-1.5" role="tablist" aria-label="Input type">
           <button
             type="button"
             role="tab"
@@ -971,6 +1183,16 @@ export function HushmarkWorkspace() {
           <button
             type="button"
             role="tab"
+            aria-selected={mode === "document"}
+            className={`flex h-11 items-center justify-center gap-2 rounded-xl text-sm font-semibold transition ${mode === "document" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
+            onClick={() => setMode("document")}
+          >
+            <RiFileTextLine className="size-4" aria-hidden="true" />
+            Document
+          </button>
+          <button
+            type="button"
+            role="tab"
             aria-selected={mode === "audio"}
             className={`flex h-11 items-center justify-center gap-2 rounded-xl text-sm font-semibold transition ${mode === "audio" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
             onClick={() => setMode("audio")}
@@ -980,7 +1202,7 @@ export function HushmarkWorkspace() {
           </button>
         </div>
 
-        {mode === "text" ? <TextWorkspace /> : <AudioWorkspace />}
+        {mode === "text" ? <TextWorkspace /> : mode === "document" ? <DocumentWorkspace /> : <AudioWorkspace />}
 
         <footer className="mt-12 flex flex-col items-center justify-between gap-3 border-t py-6 text-center text-xs text-muted-foreground sm:flex-row sm:text-left">
           <p>HushMark processes each request without retaining your content.</p>

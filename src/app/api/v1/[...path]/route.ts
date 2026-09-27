@@ -1,4 +1,4 @@
-const allowedPaths = new Set(["analyze", "analyze/audio", "redact/audio"]);
+const allowedPaths = new Set(["analyze", "analyze/audio", "redact/audio", "analyze/document", "redact/document"]);
 
 export const runtime = "nodejs";
 
