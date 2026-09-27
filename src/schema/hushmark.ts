@@ -56,6 +56,13 @@ export const audioDetectionSchema = detectionSchema.extend({
   audioEndMs: z.number().int().positive(),
 });
 
+export const audioWordTimingSchema = z.object({
+  start: z.number().int().nonnegative(),
+  end: z.number().int().positive(),
+  audioStartMs: z.number().int().nonnegative(),
+  audioEndMs: z.number().int().positive(),
+}).refine((word) => word.start < word.end && word.audioStartMs < word.audioEndMs);
+
 export const textAnalysisResponseSchema = z.object({
   analysisId: analysisIdSchema,
   textLength: z.number().int().nonnegative(),
@@ -64,7 +71,12 @@ export const textAnalysisResponseSchema = z.object({
 
 export const audioAnalysisResponseSchema = textAnalysisResponseSchema.extend({
   transcript: z.string(),
+  wordTimings: z.array(audioWordTimingSchema),
   detections: z.array(audioDetectionSchema),
+}).superRefine((analysis, context) => {
+  if (Array.from(analysis.transcript).length !== analysis.textLength || analysis.wordTimings.some((word, index) =>
+    word.end > analysis.textLength || (index > 0 && word.start < analysis.wordTimings[index - 1].end)
+  )) context.addIssue({ code: "custom", message: "Audio word timings do not match the transcript." });
 });
 
 export const apiErrorSchema = z.object({
@@ -150,6 +162,7 @@ export const redactTextRequestSchema = z.object({
 export type ReviewStatus = z.infer<typeof reviewStatusSchema>;
 export type Detection = z.infer<typeof detectionSchema>;
 export type AudioDetection = z.infer<typeof audioDetectionSchema>;
+export type AudioWordTiming = z.infer<typeof audioWordTimingSchema>;
 export type TextAnalysisResponse = z.infer<typeof textAnalysisResponseSchema>;
 export type AudioAnalysisResponse = z.infer<typeof audioAnalysisResponseSchema>;
 export type AnalyzeTextInput = z.infer<typeof textFormSchema>;

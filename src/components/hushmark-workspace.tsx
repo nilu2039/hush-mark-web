@@ -24,7 +24,7 @@ import {
 import { useForm } from "@tanstack/react-form";
 import { useCallback, useEffect, useRef, useState, type DragEvent, type PointerEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
-import { audioOffsetFromPosition, hasAudioSignal } from "@/lib/audio";
+import { audioOffsetFromPosition, audioRangeFromTranscriptSelection, hasAudioSignal } from "@/lib/audio";
 import { formatEntityType, textForDetection } from "@/lib/pii";
 import { apiOffset, audioReviewIssue, nextManualId, renderedSelection, textReviewIssue } from "@/lib/review";
 import {
@@ -128,8 +128,8 @@ function HighlightedText({
         <button
           type="button"
           key={`${detection.id}-${start}`}
-          className={`rounded px-1 py-0.5 font-medium ring-1 transition hover:ring-2 ${className}`}
-          onClick={() => onSelect(detection)}
+          className={`rounded px-1 py-0.5 font-medium ring-1 transition hover:ring-2 select-text ${className}`}
+          onClick={(event) => { if (event.detail === 0 || window.getSelection()?.isCollapsed !== false) onSelect(detection); }}
           title={`Play ${formatEntityType(detection.type)} segment`}
         >
           {value}
@@ -153,6 +153,7 @@ function ReviewList({
   onEdit,
   selectedRange,
   selectedAudioRange,
+  selectedTranscriptRange,
   showOffsets = false,
 }: {
   text: string;
@@ -163,6 +164,7 @@ function ReviewList({
   onEdit?: (id: string, change: Partial<Detection & AudioDetection>) => void;
   selectedRange?: { start: number; end: number } | null;
   selectedAudioRange?: { startMs: number; endMs: number } | null;
+  selectedTranscriptRange?: { start: number; end: number; startMs: number; endMs: number } | null;
   showOffsets?: boolean;
 }) {
   if (detections.length === 0) {
@@ -214,7 +216,7 @@ function ReviewList({
                   )}
                 </div>
                 <p className="mt-2 truncate text-base font-medium" title={textForDetection(text, detection.start, detection.end)}>
-                  {audioDetection && detection.id.startsWith("man_") ? "Manual audio interval" : `“${textForDetection(text, detection.start, detection.end)}”`}
+                  {audioDetection && detection.id.startsWith("man_") && detection.start === detection.end ? "Manual audio interval" : `“${textForDetection(text, detection.start, detection.end)}”`}
                 </p>
               </div>
               {audioDetection && onPreview && (
@@ -240,16 +242,22 @@ function ReviewList({
                 {audioDetection ? (
                   <>
                     <label className="text-xs font-medium">Start (seconds)
-                      <input type="number" min="0" step="0.001" defaultValue={audioDetection.audioStartMs / 1000} onBlur={(event) => onEdit(detection.id, { audioStartMs: Math.round(Number(event.target.value) * 1000) })} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
+                      <input key={audioDetection.audioStartMs} type="number" min="0" step="0.001" defaultValue={audioDetection.audioStartMs / 1000} onBlur={(event) => onEdit(detection.id, { audioStartMs: Math.round(Number(event.target.value) * 1000) })} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
                     </label>
                     <label className="text-xs font-medium">End (seconds)
-                      <input type="number" min="0" step="0.001" defaultValue={audioDetection.audioEndMs / 1000} onBlur={(event) => onEdit(detection.id, { audioEndMs: Math.round(Number(event.target.value) * 1000) })} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
+                      <input key={audioDetection.audioEndMs} type="number" min="0" step="0.001" defaultValue={audioDetection.audioEndMs / 1000} onBlur={(event) => onEdit(detection.id, { audioEndMs: Math.round(Number(event.target.value) * 1000) })} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
                     </label>
                     {selectedAudioRange !== undefined && (
                       <Button type="button" variant="outline" className="sm:col-span-3" disabled={!selectedAudioRange} onClick={() => {
-                        if (selectedAudioRange) onEdit(detection.id, { audioStartMs: selectedAudioRange.startMs, audioEndMs: selectedAudioRange.endMs });
+                        if (selectedTranscriptRange) onEdit(detection.id, {
+                          start: selectedTranscriptRange.start,
+                          end: selectedTranscriptRange.end,
+                          audioStartMs: selectedTranscriptRange.startMs,
+                          audioEndMs: selectedTranscriptRange.endMs,
+                        });
+                        else if (selectedAudioRange) onEdit(detection.id, { audioStartMs: selectedAudioRange.startMs, audioEndMs: selectedAudioRange.endMs });
                       }}>
-                        Use selected audio interval
+                        {selectedTranscriptRange ? "Use selected transcript range" : "Use selected audio interval"}
                       </Button>
                     )}
                   </>
@@ -968,6 +976,7 @@ function AudioWorkspace() {
   const redactMutation = useRedactAudioMutation();
   const inputRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const transcriptRef = useRef<HTMLDivElement>(null);
   const waveformRef = useRef<HTMLCanvasElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -985,6 +994,7 @@ function AudioWorkspace() {
   const [manualType, setManualType] = useState<PiiType>("PERSON");
   const [manualStart, setManualStart] = useState("0");
   const [manualEnd, setManualEnd] = useState("0");
+  const [selectedTranscriptRange, setSelectedTranscriptRange] = useState<ReturnType<typeof audioRangeFromTranscriptSelection>>(null);
   const [microphones, setMicrophones] = useState<MediaDeviceInfo[]>([]);
   const [selectedMicrophoneId, setSelectedMicrophoneId] = useState("");
   const [activeMicrophoneName, setActiveMicrophoneName] = useState("");
@@ -1004,6 +1014,7 @@ function AudioWorkspace() {
       setOutputUrl(null);
       setManualStart("0");
       setManualEnd("0");
+      setSelectedTranscriptRange(null);
       redactMutation.reset();
       const result = await analyzeMutation.mutateAsync(value.file);
       if (version !== reviewVersion.current || selectedAudioRef.current !== value.file) return;
@@ -1100,6 +1111,7 @@ function AudioWorkspace() {
     setPlayheadMs(0);
     setManualStart("0");
     setManualEnd("0");
+    setSelectedTranscriptRange(null);
     setReview(null);
     analyzeMutation.reset();
     redactMutation.reset();
@@ -1222,7 +1234,8 @@ function AudioWorkspace() {
     setReview((current) => current ? {
       ...current,
       detections: [...current.detections, {
-        id: nextManualId(current.detections), type: manualType, start: 0, end: 0,
+        id: nextManualId(current.detections), type: manualType,
+        start: selectedTranscriptRange?.start ?? 0, end: selectedTranscriptRange?.end ?? 0,
         audioStartMs, audioEndMs, status: "pending", confidence: 1, source: "manual",
       }],
       decisions: { ...current.decisions, [nextManualId(current.detections)]: "pending" },
@@ -1230,14 +1243,26 @@ function AudioWorkspace() {
     setOutputUrl(null);
     redactMutation.reset();
     setManualEnd(manualStart);
+    setSelectedTranscriptRange(null);
   }
 
   function selectAudioRange(startMs: number, endMs: number) {
+    setSelectedTranscriptRange(null);
     setManualStart((startMs / 1000).toFixed(3));
     setManualEnd((endMs / 1000).toFixed(3));
   }
 
-  function previewDetection(detection: AudioDetection) {
+  function captureTranscriptSelection() {
+    if (!review) return;
+    const offsets = renderedSelection(transcriptRef.current, review.transcript);
+    if (!offsets) return;
+    const range = audioRangeFromTranscriptSelection(offsets, review.wordTimings);
+    setSelectedTranscriptRange(range);
+    setManualStart(range ? (range.startMs / 1000).toFixed(3) : "");
+    setManualEnd(range ? (range.endMs / 1000).toFixed(3) : "");
+  }
+
+  function previewDetection(detection: { audioStartMs: number; audioEndMs: number }) {
     const player = audioRef.current;
     if (!player) return;
     if (previewTimerRef.current) window.clearTimeout(previewTimerRef.current);
@@ -1459,18 +1484,23 @@ function AudioWorkspace() {
               {durationMs !== undefined && durationMs > 0 && (
                 <AudioRangeSelector durationMs={durationMs} marks={review.detections} decisions={review.decisions} selection={selectedAudioRange} playheadMs={playheadMs} onChange={selectAudioRange} />
               )}
-              <div className="max-h-96 overflow-auto whitespace-pre-wrap rounded-2xl bg-muted/55 p-4 text-[15px] leading-8">
+              <div ref={transcriptRef} className="max-h-96 overflow-auto whitespace-pre-wrap rounded-2xl bg-muted/55 p-4 text-[15px] leading-8" onPointerUp={() => window.setTimeout(captureTranscriptSelection, 0)} onKeyUp={captureTranscriptSelection}>
                 <HighlightedText
                   text={review.transcript}
                   detections={review.detections}
                   decisions={review.decisions}
                   onSelect={(detection) => previewDetection(detection as AudioDetection)}
+                  selection={selectedTranscriptRange}
                 />
               </div>
-              <p className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
-                <RiPlayLine className="size-3.5" aria-hidden="true" />
-                Select a highlighted phrase to hear that interval.
-              </p>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                <p>Select transcript words to set the audio interval. Select a highlighted phrase to hear it.</p>
+                {selectedTranscriptRange && (
+                  <Button type="button" variant="ghost" size="sm" onClick={() => previewDetection({ audioStartMs: selectedTranscriptRange.startMs, audioEndMs: selectedTranscriptRange.endMs })}>
+                    <RiPlayLine aria-hidden="true" /> Play selection
+                  </Button>
+                )}
+              </div>
 
               <div className="mt-5 border-t pt-5">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1518,7 +1548,7 @@ function AudioWorkspace() {
             <ReviewHeader detections={review.detections} decisions={review.decisions} onSetAll={setAll} />
             <div className="mb-5 rounded-2xl border bg-card p-4">
               <p className="font-semibold">Add a missed audio interval</p>
-              <p className="mt-1 text-xs text-muted-foreground">Drag across the timeline while listening. Adjust the times below if needed.</p>
+              <p className="mt-1 text-xs text-muted-foreground">Select transcript words or drag across the timeline. Adjust the times below if needed.</p>
               <div className="mt-3 grid gap-2 sm:grid-cols-3">
                 <label className="text-xs font-medium">Type
                   <select value={manualType} onChange={(event) => setManualType(event.target.value as PiiType)} className="mt-1 h-10 w-full rounded-xl border bg-background px-2 text-sm focus:ring-2 focus:ring-ring">
@@ -1526,15 +1556,15 @@ function AudioWorkspace() {
                   </select>
                 </label>
                 <label className="text-xs font-medium">Start (seconds)
-                  <input type="number" min="0" step="0.001" value={manualStart} onChange={(event) => setManualStart(event.target.value)} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
+                  <input type="number" min="0" step="0.001" value={manualStart} onChange={(event) => { setSelectedTranscriptRange(null); setManualStart(event.target.value); }} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
                 </label>
                 <label className="text-xs font-medium">End (seconds)
-                  <input type="number" min="0" step="0.001" value={manualEnd} onChange={(event) => setManualEnd(event.target.value)} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
+                  <input type="number" min="0" step="0.001" value={manualEnd} onChange={(event) => { setSelectedTranscriptRange(null); setManualEnd(event.target.value); }} className="mt-1 h-10 w-full rounded-xl border bg-background px-3 text-sm focus:ring-2 focus:ring-ring" />
                 </label>
               </div>
               <div className="mt-3 flex flex-wrap gap-2">
-                <Button type="button" variant="ghost" onClick={() => setManualStart(audioRef.current?.currentTime.toFixed(3) ?? "0")}>Use player time for start</Button>
-                <Button type="button" variant="ghost" onClick={() => setManualEnd(audioRef.current?.currentTime.toFixed(3) ?? "0")}>Use player time for end</Button>
+                <Button type="button" variant="ghost" onClick={() => { setSelectedTranscriptRange(null); setManualStart(audioRef.current?.currentTime.toFixed(3) ?? "0"); }}>Use player time for start</Button>
+                <Button type="button" variant="ghost" onClick={() => { setSelectedTranscriptRange(null); setManualEnd(audioRef.current?.currentTime.toFixed(3) ?? "0"); }}>Use player time for end</Button>
                 <Button type="button" variant="outline" disabled={!selectedAudioRange} onClick={addMark}>Add mark</Button>
               </div>
             </div>
@@ -1546,6 +1576,7 @@ function AudioWorkspace() {
               onPreview={previewDetection}
               onEdit={editMark}
               selectedAudioRange={selectedAudioRange}
+              selectedTranscriptRange={selectedTranscriptRange}
             />
           </div>
         </section>
