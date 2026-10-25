@@ -9,6 +9,8 @@ const inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
 export const metadata: Metadata = {
   title: "HushMark — Protect personal information",
   description: "Review and redact personal information from text, documents, and audio.",
+  applicationName: "HushMark",
+  icons: { icon: { url: "/hushmark-mark.svg", type: "image/svg+xml" } },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

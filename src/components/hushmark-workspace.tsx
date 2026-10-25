@@ -2,6 +2,7 @@
 
 import {
   RiArrowRightLine,
+  RiArrowRightUpLine,
   RiCheckboxCircleFill,
   RiCheckLine,
   RiCloseLine,
@@ -9,6 +10,7 @@ import {
   RiFileCopyLine,
   RiFileTextLine,
   RiFileMusicLine,
+  RiGithubFill,
   RiInformationLine,
   RiLoader4Line,
   RiLock2Line,
@@ -22,8 +24,11 @@ import {
   RiUploadCloud2Line,
 } from "@remixicon/react";
 import { useForm } from "@tanstack/react-form";
+import Image from "next/image";
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type DragEvent, type PointerEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { audioOffsetFromPosition, audioRangeFromTranscriptSelection, hasAudioSignal } from "@/lib/audio";
 import { formatEntityType, textForDetection } from "@/lib/pii";
 import { apiOffset, audioReviewIssue, nextManualId, renderedSelection, textReviewIssue } from "@/lib/review";
@@ -51,6 +56,12 @@ import {
 
 type Mode = "text" | "document" | "audio";
 type Decisions = Record<string, ReviewStatus>;
+
+const inputModes = [
+  { id: "text", label: "Text", icon: RiText },
+  { id: "document", label: "Document", icon: RiFileTextLine },
+  { id: "audio", label: "Audio", icon: RiMicLine },
+] as const;
 
 function pendingDecisions(detections: Detection[]): Decisions {
   return Object.fromEntries(detections.map((detection) => [detection.id, "pending"]));
@@ -517,7 +528,7 @@ function TextWorkspace() {
   return (
     <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
       <form
-        className="rounded-3xl border bg-card p-4 shadow-xl shadow-primary/5 sm:p-6"
+        className="rounded-3xl border bg-card p-5 shadow-sm shadow-foreground/3 sm:p-7"
         onSubmit={(event) => {
           event.preventDefault();
           void form.handleSubmit();
@@ -525,8 +536,8 @@ function TextWorkspace() {
       >
         <div className="mb-4 flex items-center justify-between gap-3">
           <div>
-            <h2 className="font-semibold">Paste or type your text</h2>
-            <p className="mt-1 text-sm text-muted-foreground">Your content is not stored by the service.</p>
+            <h2 className="text-lg font-semibold tracking-tight">Start with your text</h2>
+            <p className="mt-1 text-sm text-muted-foreground">Paste a message, a note, or anything you want to share.</p>
           </div>
           <span className="hidden items-center gap-1.5 rounded-full bg-primary/8 px-3 py-1.5 text-xs font-medium text-primary sm:flex">
             <RiLock2Line className="size-3.5" aria-hidden="true" />
@@ -544,11 +555,11 @@ function TextWorkspace() {
                   id={field.name}
                   name={field.name}
                   value={field.state.value}
-                  rows={9}
+                  rows={8}
                   placeholder="Try: Please email Arjun at arjun@example.com or call +91 98765 43210."
                   aria-invalid={Boolean(error)}
                   aria-describedby={error ? "text-error" : undefined}
-                  className="min-h-52 w-full resize-y rounded-2xl border bg-background px-4 py-4 text-[15px] leading-7 outline-none transition placeholder:text-muted-foreground/60 focus:border-primary/60 focus:ring-4 focus:ring-primary/10"
+                  className="min-h-52 w-full resize-y rounded-2xl border bg-background/70 px-5 py-4 text-[15px] leading-8 outline-none transition placeholder:text-muted-foreground/70 focus:border-primary/60 focus:ring-4 focus:ring-primary/10"
                   onBlur={field.handleBlur}
                   onSelect={(event) => {
                     if (!review || event.currentTarget.value !== review.text) return;
@@ -783,14 +794,14 @@ function DocumentWorkspace() {
   return (
     <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
       <form
-        className="rounded-3xl border bg-card p-4 shadow-xl shadow-primary/5 sm:p-6"
+        className="rounded-3xl border bg-card p-5 shadow-sm shadow-foreground/3 sm:p-7"
         onSubmit={(event) => {
           event.preventDefault();
           void form.handleSubmit();
         }}
       >
         <div className="mb-4">
-          <h2 className="font-semibold">Upload a text document</h2>
+            <h2 className="text-lg font-semibold tracking-tight">Upload a text document</h2>
           <p className="mt-1 text-sm text-muted-foreground">Choose a UTF-8 .txt, .md, or .markdown file up to 256 KiB.</p>
         </div>
         <form.Field name="file">
@@ -841,7 +852,7 @@ function DocumentWorkspace() {
         <div className="flex justify-end">
           <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting, state.values.file] as const}>
             {([canSubmit, isSubmitting, file]) => (
-              <Button type="submit" size="lg" disabled={!canSubmit || isSubmitting || !file}>
+              <Button type="submit" size="lg" className="h-11 px-5" disabled={!canSubmit || isSubmitting || !file}>
                 {isSubmitting ? <LoadingLabel>Analyzing…</LoadingLabel> : <><RiSparklingLine aria-hidden="true" />Analyze document</>}
               </Button>
             )}
@@ -1307,14 +1318,14 @@ function AudioWorkspace() {
   return (
     <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
       <form
-        className="rounded-3xl border bg-card p-4 shadow-xl shadow-primary/5 sm:p-6"
+        className="rounded-3xl border bg-card p-5 shadow-sm shadow-foreground/3 sm:p-7"
         onSubmit={(event) => {
           event.preventDefault();
           void form.handleSubmit();
         }}
       >
         <div className="mb-4">
-          <h2 className="font-semibold">Upload or record audio</h2>
+          <h2 className="text-lg font-semibold tracking-tight">Upload or record audio</h2>
           <p className="mt-1 text-sm text-muted-foreground">Choose a completed recording up to 25 MB.</p>
         </div>
 
@@ -1589,81 +1600,137 @@ export function HushmarkWorkspace() {
   const [mode, setMode] = useState<Mode>("text");
 
   return (
-    <main className="min-h-screen overflow-hidden bg-background">
-      <div className="pointer-events-none absolute inset-x-0 top-0 -z-0 h-96 bg-[radial-gradient(circle_at_top,var(--color-primary)_0,transparent_62%)] opacity-8" />
-      <header className="relative z-10 border-b bg-background/80 backdrop-blur-xl">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4 sm:px-6">
-          <div className="flex items-center gap-3">
-            <span className="grid size-10 place-items-center rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/20">
-              <RiShieldCheckFill className="size-5" aria-hidden="true" />
-            </span>
-            <div>
-              <p className="text-lg font-semibold tracking-tight">HushMark</p>
-              <p className="text-[11px] font-medium tracking-widest text-muted-foreground uppercase">Privacy studio</p>
-            </div>
-          </div>
-          <span className="flex items-center gap-2 rounded-full border bg-card px-3 py-1.5 text-xs font-medium text-muted-foreground">
-            <span className="size-1.5 rounded-full bg-primary" />
-            API v1
-          </span>
+    <div className="min-h-screen bg-background">
+      <a href="#workspace" className="sr-only z-50 rounded-lg bg-primary px-4 py-3 text-primary-foreground focus:not-sr-only focus:fixed focus:top-4 focus:left-4">
+        Skip to workspace
+      </a>
+      <header className="border-b bg-card/65">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-5 py-5 sm:px-8 lg:px-12">
+          <Link href="/" aria-label="HushMark home" className="flex items-center gap-2.5 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            <Image src="/hushmark-mark.svg" alt="" width={36} height={36} className="size-9" />
+            <span className="text-xl font-semibold tracking-tight">hushmark<span className="text-primary">.</span></span>
+            <span className="ml-3 hidden border-l pl-4 text-xs text-muted-foreground md:block">A little more private.</span>
+          </Link>
+          <nav aria-label="GitHub repositories" className="flex items-center gap-1 sm:gap-2">
+            <RiGithubFill className="mr-1 size-5 text-muted-foreground" aria-hidden="true" />
+            <a href="https://github.com/nilu2039/hush-mark" target="_blank" rel="noopener noreferrer" aria-label="Backend on GitHub (opens in a new tab)" className="inline-flex min-h-10 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-muted-foreground transition hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:text-sm">
+              Backend <RiArrowRightUpLine className="size-3.5" aria-hidden="true" />
+            </a>
+            <a href="https://github.com/nilu2039/hush-mark-web" target="_blank" rel="noopener noreferrer" aria-label="Frontend on GitHub (opens in a new tab)" className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border bg-card px-3 text-xs font-medium transition hover:border-primary/40 hover:bg-secondary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:text-sm">
+              Frontend <RiArrowRightUpLine className="size-3.5" aria-hidden="true" />
+            </a>
+          </nav>
         </div>
       </header>
 
-      <div className="relative z-10 mx-auto max-w-6xl px-4 py-10 sm:px-6 sm:py-14">
-        <section className="mx-auto mb-8 max-w-3xl text-center sm:mb-10">
-          <span className="inline-flex items-center gap-2 rounded-full border border-primary/15 bg-primary/6 px-3 py-1.5 text-xs font-semibold text-primary">
-            <RiLock2Line className="size-3.5" aria-hidden="true" />
-            Nothing is stored
-          </span>
-          <h1 className="mt-5 text-4xl font-semibold tracking-[-0.04em] sm:text-5xl lg:text-6xl">
-            Protect what matters.
-            <span className="block text-primary">Share with confidence.</span>
-          </h1>
-          <p className="mx-auto mt-5 max-w-2xl text-base leading-7 text-muted-foreground sm:text-lg">
-            Find personal information in text, documents, or speech, review every match, and decide exactly what gets hidden.
-          </p>
+      <main className="mx-auto max-w-7xl px-5 pt-12 sm:px-8 sm:pt-16 lg:px-12">
+        <section className="grid items-center gap-10 pb-12 md:grid-cols-[1.3fr_1fr] md:gap-12 sm:pb-16" aria-labelledby="page-title">
+          <div>
+            <p className="mb-5 flex items-center gap-2 text-[11px] font-semibold tracking-widest text-primary uppercase">
+              <span className="size-1.5 rounded-full bg-primary" />
+              Your content. Your call.
+            </p>
+            <h1 id="page-title" className="text-5xl leading-[1.08] font-semibold tracking-[-0.055em] sm:text-6xl lg:text-7xl">
+              Less personal.<br /><span className="text-primary">More shareable.</span>
+            </h1>
+            <p className="mt-6 max-w-lg text-base leading-7 text-muted-foreground">
+              Keep the meaning. Hide the sensitive details. Find and redact personal information in text, documents, and audio, with you in control of every match.
+            </p>
+            <div className="mt-6 flex flex-wrap gap-x-5 gap-y-2 text-xs font-medium text-muted-foreground">
+              <span className="flex items-center gap-1.5"><RiCheckLine className="size-4 text-primary" aria-hidden="true" />No account needed</span>
+              <span className="flex items-center gap-1.5"><RiCheckLine className="size-4 text-primary" aria-hidden="true" />Review before you redact</span>
+            </div>
+          </div>
+
+          <div className="relative rounded-3xl border border-primary/10 bg-secondary/55 p-5 sm:p-7">
+            <div className="mb-5 flex items-center justify-between">
+              <span className="flex items-center gap-2 text-xs font-semibold text-primary"><RiShieldCheckFill className="size-4" aria-hidden="true" />The message stays. The details don’t.</span>
+              <span className="ml-3 text-[10px] font-medium tracking-wider text-muted-foreground uppercase">Example</span>
+            </div>
+            <div className="rounded-2xl border bg-card px-5 py-6 shadow-sm shadow-primary/3 sm:px-6">
+              <p className="mb-4 text-[10px] font-semibold tracking-widest text-muted-foreground uppercase">A protected copy</p>
+              <p className="text-sm leading-9 text-foreground/85">
+                Hi, I’m <span className="rounded-md bg-primary px-2 py-1 font-mono text-xs text-primary-foreground">[PERSON]</span>.<br />
+                You can reach me at<br />
+                <span className="rounded-md bg-primary px-2 py-1 font-mono text-xs text-primary-foreground">[EMAIL]</span> to talk about the project.
+              </p>
+            </div>
+            <p className="mt-4 flex items-center gap-1.5 text-xs text-muted-foreground"><RiCheckLine className="size-4 text-primary" aria-hidden="true" />Only the details you approve get hidden.</p>
+          </div>
         </section>
 
-        <div className="mx-auto mb-6 grid max-w-lg grid-cols-3 rounded-2xl border bg-muted/70 p-1.5" role="tablist" aria-label="Input type">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === "text"}
-            className={`flex h-11 items-center justify-center gap-2 rounded-xl text-sm font-semibold transition ${mode === "text" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
-            onClick={() => setMode("text")}
-          >
-            <RiText className="size-4" aria-hidden="true" />
-            Text
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === "document"}
-            className={`flex h-11 items-center justify-center gap-2 rounded-xl text-sm font-semibold transition ${mode === "document" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
-            onClick={() => setMode("document")}
-          >
-            <RiFileTextLine className="size-4" aria-hidden="true" />
-            Document
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === "audio"}
-            className={`flex h-11 items-center justify-center gap-2 rounded-xl text-sm font-semibold transition ${mode === "audio" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
-            onClick={() => setMode("audio")}
-          >
-            <RiMicLine className="size-4" aria-hidden="true" />
-            Audio
-          </button>
-        </div>
+        <section id="workspace" aria-label="Redaction workspace" className="scroll-mt-6 border-t pt-8 sm:pt-10">
+          <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-xs font-semibold tracking-widest uppercase">Your privacy workspace</h2>
+            <span className="flex items-center gap-1.5 text-xs text-muted-foreground"><RiLock2Line className="size-3.5" aria-hidden="true" />No content retained by HushMark</span>
+          </div>
+          <div className="grid items-start gap-8 lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-10">
+            <aside className="order-last lg:order-first">
+              <p className="mb-5 text-xs font-medium text-muted-foreground">A few steps to a safer share.</p>
+              <ol className="grid gap-6 sm:grid-cols-3 lg:grid-cols-1">
+                {[
+                  { title: "Add your content", description: "Paste text, upload a document, or bring a recording." },
+                  { title: "Make the call", description: "Review each match. Keep what matters, hide what’s personal." },
+                  { title: "Share with confidence", description: "Create a protected copy, ready for a final check." },
+                ].map((step, index) => (
+                  <li key={step.title} className="flex gap-3">
+                    <span className="pt-0.5 font-mono text-xs text-primary/70">0{index + 1}</span>
+                    <div>
+                      <h3 className="text-sm font-semibold">{step.title}</h3>
+                      <p className="mt-1.5 text-xs leading-5 text-muted-foreground">{step.description}</p>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+              <div className="mt-7 border-t pt-5">
+                <p className="flex items-center gap-2 text-xs font-semibold"><RiInformationLine className="size-4 text-primary" aria-hidden="true" />A note on privacy</p>
+                <p className="mt-2 text-xs leading-5 text-muted-foreground">Text and audio are sent to OpenAI for detection and transcription. HushMark does not retain your content.</p>
+              </div>
+            </aside>
 
-        {mode === "text" ? <TextWorkspace /> : mode === "document" ? <DocumentWorkspace /> : <AudioWorkspace />}
+            <div className="min-w-0">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div className="inline-grid w-full grid-cols-3 gap-1 rounded-xl border bg-muted/70 p-1 sm:w-auto" role="tablist" aria-label="Input type">
+                  {inputModes.map(({ id, label, icon: Icon }, index) => (
+                    <button
+                      key={id}
+                      id={`input-${id}`}
+                      type="button"
+                      role="tab"
+                      aria-selected={mode === id}
+                      aria-controls={`panel-${id}`}
+                      tabIndex={mode === id ? 0 : -1}
+                      className={cn("flex min-h-10 items-center justify-center gap-1.5 rounded-lg px-1.5 text-xs font-medium transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:gap-2 sm:px-4 sm:text-sm", mode === id ? "bg-card text-primary shadow-sm ring-1 ring-border/60" : "text-muted-foreground hover:bg-card/60 hover:text-foreground")}
+                      onClick={() => setMode(id)}
+                      onKeyDown={(event) => {
+                        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+                        event.preventDefault();
+                        const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? inputModes.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + inputModes.length) % inputModes.length;
+                        const nextMode = inputModes[nextIndex].id;
+                        setMode(nextMode);
+                        document.getElementById(`input-${nextMode}`)?.focus();
+                      }}
+                    >
+                      <Icon className="size-3.5 shrink-0 sm:size-4" aria-hidden="true" />{label}
+                    </button>
+                  ))}
+                </div>
+                <span className="hidden text-xs text-muted-foreground xl:block">One less thing to worry about.</span>
+              </div>
+              {inputModes.map(({ id }) => (
+                <div key={id} id={`panel-${id}`} role="tabpanel" aria-labelledby={`input-${id}`} hidden={mode !== id} tabIndex={0} className="rounded-3xl outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-4">
+                  {mode === id && (id === "text" ? <TextWorkspace /> : id === "document" ? <DocumentWorkspace /> : <AudioWorkspace />)}
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
 
-        <footer className="mt-12 flex flex-col items-center justify-between gap-3 border-t py-6 text-center text-xs text-muted-foreground sm:flex-row sm:text-left">
-          <p>HushMark processes each request without retaining your content.</p>
-          <p>Review every detection — confidence is a hint, not a decision.</p>
+        <footer className="mt-12 flex flex-col justify-between gap-3 border-t py-6 text-xs text-muted-foreground sm:mt-16 sm:flex-row sm:items-center">
+          <p className="flex items-center gap-2"><Image src="/hushmark-mark.svg" alt="" width={20} height={20} className="size-5" /><span className="font-medium text-foreground">HushMark</span><span className="text-border">/</span>A little more peace of mind.</p>
+          <p>Detection is a starting point. Always review before sharing.</p>
         </footer>
-      </div>
-    </main>
+      </main>
+    </div>
   );
 }
